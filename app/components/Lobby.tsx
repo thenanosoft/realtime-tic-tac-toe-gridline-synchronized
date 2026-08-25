@@ -32,24 +32,26 @@ export function Lobby({ connection, busy, onCreate, onJoin }: LobbyProps) {
   return (
     <section className="lobby-layout">
       <div className="hero-copy">
-        <p className="kicker">ONE ROOM · TWO PLAYERS</p>
-        <h1>Outthink them.<br /><em>One move at a time.</em></h1>
-        <p className="lede">A fast, beautifully synchronized duel. Create a private room and invite someone you know.</p>
+        <p className="kicker"><span /> ONE ROOM · TWO MINDS</p>
+        <h1>Meet me<br /><em>at the center.</em></h1>
+        <p className="lede">A private, real-time duel reduced to its purest form. No profiles. No noise. Just nine decisions between you and someone you know.</p>
 
         <div className="lobby-card">
-          <label className="field-label" htmlFor="player-name">YOUR NAME</label>
-          <input
-            id="player-name"
-            className="name-input"
-            value={name}
-            onChange={(event) => setName(event.target.value.slice(0, 24))}
-            placeholder="How should we call you?"
-            autoComplete="nickname"
-          />
+          <div className="name-field">
+            <label className="field-label" htmlFor="player-name">YOUR NAME</label>
+            <input
+              id="player-name"
+              className="name-input"
+              value={name}
+              onChange={(event) => setName(event.target.value.slice(0, 24))}
+              placeholder="How should we call you?"
+              autoComplete="nickname"
+            />
+          </div>
           <button className="primary-action" onClick={() => onCreate(name)} disabled={unavailable}>
-            <span>{busy ? 'Creating your room…' : 'Create a room'}</span><b aria-hidden="true">↗</b>
+            <span>{busy ? 'Opening your room…' : 'Open a private room'}</span><b aria-hidden="true">↗</b>
           </button>
-          <div className="divider"><span>OR JOIN A MATCH</span></div>
+          <div className="divider"><span>OR ENTER A ROOM</span></div>
           <form className="join-row" onSubmit={submitJoin}>
             <label>
               <span className="sr-only">Six-character room code</span>
@@ -65,26 +67,31 @@ export function Lobby({ connection, busy, onCreate, onJoin }: LobbyProps) {
             <button className="join-button" disabled={unavailable}>Join</button>
           </form>
         </div>
-        <p className="privacy-note"><span aria-hidden="true">⌁</span> No account required · Rooms expire automatically</p>
+        <p className="privacy-note"><span aria-hidden="true">⌁</span> No account · No history · Just this match</p>
       </div>
 
       <div className="game-teaser" aria-label="Preview of a Gridline match">
-        <div className="teaser-topline"><span>LIVE MATCH</span><span className="room-code">ROOM · H7K29P</span></div>
+        <div className="teaser-orbit orbit-one" aria-hidden="true" />
+        <div className="teaser-orbit orbit-two" aria-hidden="true" />
+        <div className="teaser-topline"><span><i /> LIVE SIGNAL</span><span className="room-code">ROOM · H7K29P</span></div>
         <div className="teaser-player-row">
           <article className="player-mini active x-player">
-            <div><span className="player-label">PLAYER X</span><strong>You</strong></div><b>X</b>
+            <b aria-hidden="true"><i /><i /></b><div><span className="player-label">PLAYER X · ACTIVE</span><strong>You</strong></div>
           </article>
-          <span className="versus">VS</span>
+          <span className="versus"><i />VS<i /></span>
           <article className="player-mini o-player">
-            <b>O</b><div><span className="player-label">PLAYER O</span><strong>Farhan</strong></div>
+            <div><span className="player-label">PLAYER O · LIVE</span><strong>Farhan</strong></div><b aria-hidden="true" />
           </article>
         </div>
         <div className="teaser-board">
           {['X', '', 'O', '', 'X', '', 'O', '', ''].map((value, index) => (
-            <span className={`teaser-cell ${value ? `has-${value.toLowerCase()}` : ''}`} key={index}>{value}</span>
+            <span className={`teaser-cell ${value ? `has-${value.toLowerCase()}` : ''}`} key={index}>
+              {value === 'X' && <i className="teaser-x" aria-hidden="true"><b /><b /></i>}
+              {value === 'O' && <i className="teaser-o" aria-hidden="true" />}
+            </span>
           ))}
         </div>
-        <div className="turn-preview"><span className="turn-pulse" /><div><small>YOUR TURN</small><strong>Choose your next move</strong></div><span className="turn-count">04<span>s</span></span></div>
+        <div className="turn-preview"><span className="turn-pulse" /><div><small>YOUR TURN</small><strong>The shared plane is listening.</strong></div><span className="turn-count">04<span>s</span></span></div>
       </div>
     </section>
   );

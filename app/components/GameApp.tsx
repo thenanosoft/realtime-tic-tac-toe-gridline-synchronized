@@ -12,6 +12,7 @@ export function GameApp() {
 
   return (
     <main className="app-shell">
+      <div className="grain" aria-hidden="true" />
       <div className="ambient ambient-one" />
       <div className="ambient ambient-two" />
       <header className="topbar">
@@ -19,10 +20,10 @@ export function GameApp() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /><i /></span>
           <span>GRIDLINE</span>
         </div>
-        <span className="eyebrow">REAL-TIME TIC-TAC-TOE</span>
+        <span className="eyebrow">A SHARED THINKING SPACE</span>
         <div className="header-actions">
           <button className="sound-toggle" onClick={sound.toggleMuted} aria-pressed={sound.muted} aria-label={sound.muted ? 'Unmute game sounds' : 'Mute game sounds'}>
-            <span aria-hidden="true">{sound.muted ? '×' : '◖'}</span>{sound.muted ? 'Muted' : 'Sound on'}
+            <span className="sound-glyph" aria-hidden="true">{sound.muted ? '×' : '•'}</span>{sound.muted ? 'Muted' : 'Sound on'}
           </button>
           <ConnectionBadge state={game.connection} />
         </div>

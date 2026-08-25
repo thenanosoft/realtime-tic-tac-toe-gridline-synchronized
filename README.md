@@ -62,6 +62,16 @@ npm run dev
 
 Open `http://localhost:3000` in two windows. For two devices on the same network, open `http://<computer-lan-ip>:3000`; the browser automatically connects to `ws://<computer-lan-ip>:3001/ws`. Allow those two ports through the host firewall if required.
 
+## Play from another device on your local network
+
+1. Connect both computers or phones to the same Wi-Fi or Ethernet network.
+2. On the computer running Gridline, start the app with `npm run dev`.
+3. Find that computer's IPv4 address with `ipconfig` on Windows or `ip addr` on Linux.
+4. On both devices, open `http://<computer-lan-ip>:3000`. For example, if the host address is `192.168.1.62`, open `http://192.168.1.62:3000`.
+5. Create a room on one device, then enter its six-character code on the other device.
+
+The web interface uses TCP port `3000` and the game WebSocket uses TCP port `3001`. If another device cannot connect, allow inbound private-network access to both ports in the host firewall. Do not use `localhost` on the second device: there it refers to the second device itself, not the computer running Gridline.
+
 ## Verification commands
 
 ```bash

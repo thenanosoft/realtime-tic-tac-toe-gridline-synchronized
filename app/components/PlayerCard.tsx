@@ -28,16 +28,18 @@ export function PlayerCard({ mark, player, isSelf, snapshot }: PlayerCardProps) 
 
   return (
     <article className={`player-card player-${mark.toLowerCase()} ${active ? 'is-active' : ''} ${won ? 'is-winner' : ''} ${lost ? 'is-loser' : ''}`}>
-      <div className="card-shine" aria-hidden="true" />
+      <div className="presence-rail" aria-hidden="true"><i /><i /><i /></div>
       <div className="player-card-top">
-        <span className="player-slot">PLAYER {mark}</span>
+        <span className="player-slot">PLAYER {mark} / {String(mark === 'X' ? 1 : 2).padStart(2, '0')}</span>
         {isSelf && <span className="you-tag">YOU</span>}
       </div>
-      <div className={`player-emblem emblem-${mark.toLowerCase()}`} aria-hidden="true">{mark}</div>
+      <div className={`player-emblem emblem-${mark.toLowerCase()}`} aria-hidden="true">
+        {mark === 'X' ? <span className="emblem-drawn-x"><i /><i /></span> : <span className="emblem-drawn-o" />}
+      </div>
       <h2>{player?.name ?? 'Waiting…'}</h2>
       <div className={`presence ${player?.connected ? 'online' : 'offline'}`}>
         <span aria-hidden="true" />
-        {player?.connected ? 'Connected' : player ? 'Connection lost' : 'Not connected'}
+        {player?.connected ? 'Signal live' : player ? 'Signal interrupted' : 'Open invitation'}
       </div>
       <div className="player-state"><i aria-hidden="true" />{stateLabel}</div>
     </article>

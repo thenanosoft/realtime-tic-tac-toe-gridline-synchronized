@@ -27,6 +27,13 @@ export function GameRoom({ snapshot, session, connection, pendingMove, onMove, o
   const oPlayer = snapshot.players.find((player) => player.mark === 'O');
   const self = snapshot.players.find((player) => player.id === session.playerId);
   const canMove = connection === 'connected' && snapshot.phase === 'active' && snapshot.turn === self?.mark && !pendingMove;
+  const sceneState = snapshot.winner
+    ? `winner-${snapshot.winner.toLowerCase()}`
+    : snapshot.isDraw
+      ? 'balanced'
+      : snapshot.phase === 'active'
+        ? `turn-${snapshot.turn.toLowerCase()}`
+        : snapshot.phase;
 
   useEffect(() => {
     const previous = previousRef.current;
@@ -63,10 +70,12 @@ export function GameRoom({ snapshot, session, connection, pendingMove, onMove, o
   };
 
   return (
-    <section className="room-shell">
+    <section className={`room-shell scene-${sceneState}`}>
+      <div className="arena-light light-x" aria-hidden="true" />
+      <div className="arena-light light-o" aria-hidden="true" />
       <div className="room-heading">
         <div>
-          <span className="room-kicker">PRIVATE MATCH · ROUND {String(snapshot.round).padStart(2, '0')}</span>
+          <span className="room-kicker">PRIVATE SIGNAL · ROUND {String(snapshot.round).padStart(2, '0')}</span>
           <h1>Room <b>{snapshot.roomCode}</b></h1>
         </div>
         <button className={`copy-room ${copied ? 'copied' : ''}`} onClick={copyCode} aria-label={`Copy room code ${snapshot.roomCode}`}>
@@ -75,10 +84,11 @@ export function GameRoom({ snapshot, session, connection, pendingMove, onMove, o
       </div>
 
       <div className="arena">
+        <div className="arena-axis" aria-hidden="true"><i /><span>SHARED PLANE</span><i /></div>
         <div className="player-x-area"><PlayerCard mark="X" player={xPlayer} isSelf={xPlayer?.id === session.playerId} snapshot={snapshot} /></div>
         <div className="board-area">
           <div className="board-frame">
-            <div className="board-meta"><span>SERVER-AUTHORITATIVE BOARD</span><span>v{snapshot.version}</span></div>
+            <div className="board-meta"><span>01 / SERVER-AUTHORITATIVE</span><span>SYNC {String(snapshot.version).padStart(3, '0')}</span></div>
             <GameBoard snapshot={snapshot} myMark={self?.mark ?? session.mark} interactive={canMove} onMove={onMove} />
             {snapshot.phase === 'countdown' && snapshot.countdownEndsAt && <Countdown endsAt={snapshot.countdownEndsAt} />}
             {pendingMove && <div className="move-pending"><span /> Confirming move</div>}

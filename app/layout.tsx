@@ -14,17 +14,17 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'http://localhost:3000'),
-  title: 'Gridline — Real-time Tic-Tac-Toe',
-  description: 'A polished two-player Tic-Tac-Toe game synchronized over WebSockets.',
+  title: 'Gridline — A Shared Thinking Space',
+  description: 'A private real-time Tic-Tac-Toe duel for two minds in one shared arena.',
   openGraph: {
-    title: 'Gridline — Real-time Tic-Tac-Toe',
-    description: 'Create a private room and challenge a friend in a beautifully synchronized duel.',
+    title: 'Gridline — A Shared Thinking Space',
+    description: 'Create a private room and meet your opponent at the center.',
     images: [{ url: '/og.png', width: 1200, height: 630, alt: 'Gridline real-time Tic-Tac-Toe' }],
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Gridline — Real-time Tic-Tac-Toe',
-    description: 'Create a private room and challenge a friend in a beautifully synchronized duel.',
+    title: 'Gridline — A Shared Thinking Space',
+    description: 'Create a private room and meet your opponent at the center.',
     images: ['/og.png'],
   },
 };

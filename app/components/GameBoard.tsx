@@ -33,7 +33,7 @@ export function GameBoard({ snapshot, myMark, interactive, onMove }: GameBoardPr
   };
 
   return (
-    <div className={`game-board ${interactive ? 'is-interactive' : ''} ${snapshot.winner ? 'has-winner' : ''}`} role="grid" aria-label="Tic-Tac-Toe board">
+    <div className={`game-board preview-${myMark.toLowerCase()} ${interactive ? 'is-interactive' : ''} ${snapshot.winner ? 'has-winner' : ''}`} role="grid" aria-label="Tic-Tac-Toe board">
       {snapshot.board.map((mark, index) => {
         const winning = snapshot.winningLine?.includes(index);
         const dimmed = Boolean(snapshot.winningLine && !winning);
@@ -53,6 +53,7 @@ export function GameBoard({ snapshot, myMark, interactive, onMove }: GameBoardPr
           >
             {mark === 'X' && <span className="drawn-x" aria-hidden="true"><i /><i /></span>}
             {mark === 'O' && <span className="drawn-o" aria-hidden="true" />}
+            {!mark && <span className={`ghost-symbol ghost-${myMark.toLowerCase()}`} aria-hidden="true"><i /><i /></span>}
           </button>
         );
       })}

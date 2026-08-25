@@ -8,23 +8,23 @@ export function GameStatus({ snapshot, session, onRematch }: { snapshot: RoomSna
   const complete = snapshot.phase === 'game_over' || snapshot.phase === 'rematch_waiting';
 
   let eyebrow = 'MATCH STATUS';
-  let title = 'Waiting for opponent…';
-  let detail = 'Share the room code to begin.';
+  let title = 'The other side is open.';
+  let detail = 'Share the room signal to invite your opponent.';
   let tone = 'waiting';
 
   if (snapshot.phase === 'countdown') {
-    eyebrow = 'GET READY'; title = 'Match starting'; detail = `Round ${snapshot.round} is about to begin.`; tone = 'starting';
+    eyebrow = 'SIGNAL FOUND'; title = 'Two minds connected.'; detail = `Round ${snapshot.round} is about to begin.`; tone = 'starting';
   } else if (snapshot.phase === 'paused') {
-    eyebrow = 'MATCH PAUSED'; title = opponent?.connected ? 'Connection interrupted' : 'Opponent disconnected'; detail = 'Waiting for reconnection. Their place is being held.'; tone = 'offline';
+    eyebrow = 'MATCH SUSPENDED'; title = opponent?.connected ? 'Connection interrupted' : 'Their signal went quiet.'; detail = 'The board is held exactly as it was.'; tone = 'offline';
   } else if (snapshot.phase === 'active') {
-    eyebrow = yourTurn ? 'YOUR TURN' : 'OPPONENT’S TURN'; title = yourTurn ? 'Make your move' : 'Opponent is thinking'; detail = yourTurn ? 'The board is yours.' : 'The board unlocks when the server confirms their move.'; tone = yourTurn ? 'your-turn' : 'their-turn';
+    eyebrow = yourTurn ? 'YOUR TURN' : 'THEIR TURN'; title = yourTurn ? 'The plane is yours.' : 'The room is listening to them.'; detail = yourTurn ? 'Choose an open coordinate.' : 'Your side will return when their move lands.'; tone = yourTurn ? 'your-turn' : 'their-turn';
   } else if (complete) {
     if (snapshot.isDraw) {
-      eyebrow = 'DRAW'; title = 'Perfectly matched.'; detail = 'Good match. Run it back?'; tone = 'draw';
+      eyebrow = 'DRAW'; title = 'Perfectly balanced.'; detail = 'Nine decisions. Nothing between you.'; tone = 'draw';
     } else if (snapshot.winner === self?.mark) {
-      eyebrow = 'VICTORY'; title = 'You won.'; detail = 'That line was all yours.'; tone = 'victory';
+      eyebrow = 'YOU WON'; title = 'The line is yours.'; detail = 'A clean signal through the noise.'; tone = 'victory';
     } else {
-      eyebrow = 'MATCH OVER'; title = 'Opponent won.'; detail = 'Close one. There’s always a rematch.'; tone = 'defeat';
+      eyebrow = 'OPPONENT WON'; title = 'Their line held.'; detail = 'The board is ready when you are.'; tone = 'defeat';
     }
   }
 
