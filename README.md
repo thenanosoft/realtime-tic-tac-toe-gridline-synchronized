@@ -99,10 +99,16 @@ https://thenanosoft.github.io/realtime-tic-tac-toe-gridline-synchronized/
 
 GitHub Pages cannot run the Node WebSocket service. Configure the repository Actions variable `NEXT_PUBLIC_WS_URL` to the real public `wss://.../ws` endpoint before expecting multiplayer on Pages. An insecure `ws://` value fails the workflow. When the variable is absent, the static frontend reports realtime as unavailable instead of attempting localhost or pretending the backend exists.
 
-For the Node WebSocket host, configure:
+The realtime backend is defined as a Render Blueprint in `render.yaml`. It runs
+as a free Node Web Service in Singapore, uses `/health` for deploy health
+checks, accepts public WebSocket upgrades at `/ws`, and automatically deploys
+from `main`. Render supplies the public `PORT`; local and self-hosted setups can
+continue to use `WS_PORT`.
+
+For any Node WebSocket host, configure:
 
 ```text
-WS_PORT=<provider port>
+PORT=<provider port>
 ALLOWED_ORIGINS=https://thenanosoft.github.io
 ```
 

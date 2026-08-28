@@ -7,7 +7,9 @@ async function main() {
     .map((origin) => origin.trim())
     .filter(Boolean);
   const server = await createGameServer({
-    port: Number(process.env.WS_PORT ?? 3001),
+    // Render and most managed web-service hosts inject PORT. Keep WS_PORT as
+    // the explicit local/self-hosted override used by the existing setup.
+    port: Number(process.env.WS_PORT ?? process.env.PORT ?? 3001),
     allowedOrigins,
   });
   console.log(`Gridline WebSocket authority listening on ws://localhost:${server.port}/ws`);
