@@ -1,7 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import WebSocket from 'ws';
 import { createGameServer, type GameServerHandle } from '../server/createGameServer';
-import type { ClientMessage, RoomSnapshot, ServerMessage } from '../shared/protocol';
+import {
+  MAX_CHAT_IMAGE_BYTES,
+  MAX_CHAT_IMAGE_DIMENSION,
+  MAX_CHAT_TEXT_LENGTH,
+  type ClientMessage,
+  type RoomSnapshot,
+  type ServerMessage,
+} from '../shared/protocol';
+import { TEMPORARY_NAME_PATTERN } from '../server/rooms/identity';
 
 class TestClient {
   private readonly messages: ServerMessage[] = [];
@@ -68,8 +76,14 @@ class TestClient {
 
 const isSession = (message: ServerMessage): message is Extract<ServerMessage, { type: 'session.ready' }> => message.type === 'session.ready';
 const isRejection = (message: ServerMessage): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected';
+const isChatMessage = (message: ServerMessage): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message';
+const isSessionEnded = (message: ServerMessage): message is Extract<ServerMessage, { type: 'session.ended' }> => message.type === 'session.ended';
 const snapshotWhere = (predicate: (snapshot: RoomSnapshot) => boolean) =>
   (message: ServerMessage): message is Extract<ServerMessage, { type: 'game.snapshot' }> => message.type === 'game.snapshot' && predicate(message.snapshot);
+const ONE_PIXEL_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+);
 
 describe('real WebSocket multiplayer authority', () => {
   let server: GameServerHandle;
@@ -83,7 +97,9 @@ describe('real WebSocket multiplayer authority', () => {
       countdownMs: 15,
       heartbeatMs: 5_000,
       emptyRoomTtlMs: 25,
+      waitingRoomTtlMs: 25,
       cleanupIntervalMs: 5,
+      typingTtlMs: 35,
     });
     url = `ws://127.0.0.1:${server.port}/ws`;
   });
@@ -103,12 +119,15 @@ describe('real WebSocket multiplayer authority', () => {
   async function createMatch() {
     const x = await connect();
     const o = await connect();
-    x.send({ type: 'room.create', requestId: 'create-x', name: 'Ada' });
+    x.send({ type: 'room.create', requestId: 'create-x' });
     const xSession = await x.waitFor(isSession);
-    o.send({ type: 'room.join', requestId: 'join-o', roomCode: xSession.roomCode, name: 'Grace' });
+    o.send({ type: 'room.join', requestId: 'join-o', roomCode: xSession.roomCode });
     const oSession = await o.waitFor(isSession);
     await x.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'active'));
     await o.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'active'));
+    expect(xSession.displayName).toMatch(TEMPORARY_NAME_PATTERN);
+    expect(oSession.displayName).toMatch(TEMPORARY_NAME_PATTERN);
+    expect(oSession.displayName).not.toBe(xSession.displayName);
     return { x, o, xSession, oSession };
   }
 
@@ -123,7 +142,7 @@ describe('real WebSocket multiplayer authority', () => {
   it('lets two players join, rejects a third, and rejects malformed or illegal commands', async () => {
     const { x, o, xSession } = await createMatch();
     const third = await connect();
-    third.send({ type: 'room.join', requestId: 'join-third', roomCode: xSession.roomCode, name: 'Linus' });
+    third.send({ type: 'room.join', requestId: 'join-third', roomCode: xSession.roomCode });
     expect((await third.waitFor(isRejection)).code).toBe('ROOM_FULL');
 
     o.send({ type: 'game.move', requestId: 'wrong-turn', cell: 0, expectedVersion: o.latestSnapshot().version });
@@ -152,7 +171,7 @@ describe('real WebSocket multiplayer authority', () => {
   });
 
   it('synchronizes victory, rejects post-game moves, and requires two rematch votes', async () => {
-    const { x, o } = await createMatch();
+    const { x, o, xSession } = await createMatch();
     await move(x, o, 'x-0', 0, 1);
     await move(o, x, 'o-3', 3, 2);
     await move(x, o, 'x-1', 1, 3);
@@ -167,7 +186,7 @@ describe('real WebSocket multiplayer authority', () => {
 
     x.send({ type: 'rematch.vote', requestId: 'rematch-x' });
     const waiting = await o.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'rematch_waiting'));
-    expect(waiting.snapshot.players.find((player) => player.name === 'Ada')?.wantsRematch).toBe(true);
+    expect(waiting.snapshot.players.find((player) => player.id === xSession.playerId)?.wantsRematch).toBe(true);
     expect(waiting.snapshot.board.filter(Boolean)).toHaveLength(5);
 
     o.send({ type: 'rematch.vote', requestId: 'rematch-o' });
@@ -175,7 +194,7 @@ describe('real WebSocket multiplayer authority', () => {
     const restartedO = await o.waitFor(snapshotWhere((snapshot) => snapshot.round === 2 && snapshot.phase === 'active'));
     expect(restartedX.snapshot).toEqual(restartedO.snapshot);
     expect(restartedX.snapshot.board.every((cell) => cell === null)).toBe(true);
-    expect(restartedX.snapshot.players.find((player) => player.name === 'Ada')?.mark).toBe('O');
+    expect(restartedX.snapshot.players.find((player) => player.id === xSession.playerId)?.mark).toBe('O');
   });
 
   it('reaches an identical draw state on both clients', async () => {
@@ -195,8 +214,135 @@ describe('real WebSocket multiplayer authority', () => {
     expect(snapshot?.phase).toBe('game_over');
   });
 
+  it('delivers private text, deduplicates retries, and rejects unauthenticated or oversized chat', async () => {
+    const { x, o, xSession } = await createMatch();
+    x.send({ type: 'chat.message', requestId: 'text-one', text: 'Nice move 😂' });
+    const received = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message' && message.ackRequestId === 'text-one');
+    expect(received.message.kind).toBe('text');
+    expect(received.message.senderId).toBe(xSession.playerId);
+    if (received.message.kind === 'text') expect(received.message.text).toBe('Nice move 😂');
+
+    x.send({ type: 'chat.message', requestId: 'text-one', text: 'Nice move 😂' });
+    const resumed = await connect();
+    resumed.send({ type: 'session.resume', requestId: 'resume-for-dedupe', roomCode: xSession.roomCode, playerToken: xSession.playerToken });
+    const state = await resumed.waitFor(isSession);
+    expect(state.chat.messages.filter((message) => message.kind === 'text' && message.text === 'Nice move 😂')).toHaveLength(1);
+
+    const outsider = await connect();
+    outsider.send({ type: 'chat.message', requestId: 'other-room-attempt', text: 'not allowed' });
+    expect((await outsider.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'other-room-attempt')).code).toBe('NOT_IN_ROOM');
+
+    o.sendRaw(JSON.stringify({ type: 'chat.message', requestId: 'oversized-text', text: 'x'.repeat(MAX_CHAT_TEXT_LENGTH + 1) }));
+    expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'oversized-text')).code).toBe('MESSAGE_TOO_LONG');
+  });
+
+  it('broadcasts typing and expires it automatically when the stop event is lost', async () => {
+    const { x, o, xSession } = await createMatch();
+    x.send({ type: 'chat.typing', typing: true });
+    const started = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.typing' }> => message.type === 'chat.typing' && message.playerId === xSession.playerId && message.isTyping);
+    expect(started.expiresAt).toBeTypeOf('number');
+    const stopped = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.typing' }> => message.type === 'chat.typing' && message.playerId === xSession.playerId && !message.isTyping, 500);
+    expect(stopped.expiresAt).toBeNull();
+  });
+
+  it('validates and synchronizes quick reactions, message reactions, and stickers', async () => {
+    const { x, o, oSession } = await createMatch();
+    x.send({ type: 'chat.message', requestId: 'reactable', text: 'Good game' });
+    const chat = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message' && message.ackRequestId === 'reactable');
+    o.send({ type: 'chat.message-reaction', requestId: 'heart-it', messageId: chat.message.id, reaction: '❤️' });
+    const updated = await x.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message-reaction' }> => message.type === 'chat.message-reaction' && message.messageId === chat.message.id);
+    expect(updated.reactions).toEqual([{ reaction: '❤️', playerIds: [oSession.playerId] }]);
+
+    o.send({ type: 'chat.quick-reaction', requestId: 'instant-fire', reaction: '🔥' });
+    const quick = await x.waitFor((message): message is Extract<ServerMessage, { type: 'chat.quick-reaction' }> => message.type === 'chat.quick-reaction' && message.ackRequestId === 'instant-fire');
+    expect(quick.reaction).toBe('🔥');
+    expect(quick.senderId).toBe(oSession.playerId);
+
+    x.send({ type: 'chat.sticker', requestId: 'sticker-fire', stickerId: 'fire' });
+    const sticker = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message' && message.ackRequestId === 'sticker-fire');
+    expect(sticker.message.kind).toBe('sticker');
+    if (sticker.message.kind === 'sticker') expect(sticker.message.stickerId).toBe('fire');
+
+    x.sendRaw(JSON.stringify({ type: 'chat.sticker', requestId: 'bad-sticker', stickerId: 'remote-url' }));
+    expect((await x.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'bad-sticker')).code).toBe('INVALID_STICKER');
+    o.sendRaw(JSON.stringify({ type: 'chat.quick-reaction', requestId: 'bad-reaction', reaction: 'custom' }));
+    expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'bad-reaction')).code).toBe('INVALID_REACTION');
+  });
+
+  it('relays allowlisted images in RAM and rejects mismatched or oversized metadata', async () => {
+    const { x, o, xSession } = await createMatch();
+    const png = ONE_PIXEL_PNG;
+    x.send({
+      type: 'chat.image', requestId: 'image-one', mime: 'image/png', width: 1, height: 1,
+      byteLength: png.byteLength, data: png.toString('base64'),
+    });
+    const image = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message' && message.ackRequestId === 'image-one');
+    expect(image.message.kind).toBe('image');
+    if (image.message.kind === 'image') {
+      expect(image.message.mime).toBe('image/png');
+      expect(Buffer.from(image.message.data, 'base64')).toEqual(png);
+    }
+    expect(server.manager.getEphemeralStats(xSession.roomCode)?.imageBytes).toBe(png.byteLength);
+
+    o.sendRaw(JSON.stringify({
+      type: 'chat.image', requestId: 'bad-mime', mime: 'image/webp', width: 1, height: 1,
+      byteLength: png.byteLength, data: png.toString('base64'),
+    }));
+    expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'bad-mime')).code).toBe('INVALID_IMAGE');
+    o.sendRaw(JSON.stringify({
+      type: 'chat.image', requestId: 'oversized-image', mime: 'image/png', width: 1, height: 1,
+      byteLength: MAX_CHAT_IMAGE_BYTES + 1, data: png.toString('base64'),
+    }));
+    expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'oversized-image')).code).toBe('INVALID_IMAGE');
+
+    o.send({
+      type: 'chat.image', requestId: 'wrong-dimensions', mime: 'image/png', width: 2, height: 1,
+      byteLength: png.byteLength, data: png.toString('base64'),
+    });
+    expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'wrong-dimensions')).code).toBe('INVALID_IMAGE');
+
+    const deceptivePng = Buffer.from(png);
+    deceptivePng.writeUInt32BE(MAX_CHAT_IMAGE_DIMENSION + 1, 16);
+    o.send({
+      type: 'chat.image', requestId: 'intrinsic-too-large', mime: 'image/png', width: 1, height: 1,
+      byteLength: deceptivePng.byteLength, data: deceptivePng.toString('base64'),
+    });
+    expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'intrinsic-too-large')).code).toBe('INVALID_IMAGE');
+  });
+
+  it('rejects all binary client frames instead of accumulating untrusted chunks', async () => {
+    const client = await connect();
+    const closed = new Promise<number>((resolve) => client.socket.once('close', resolve));
+    client.socket.send(Buffer.from([1, 2, 3]), { binary: true });
+    expect(await closed).toBe(1003);
+  });
+
+  it('centralizes explicit room destruction and clears chat, images, typing, identities, and tokens', async () => {
+    const { x, o, xSession } = await createMatch();
+    const png = ONE_PIXEL_PNG;
+    x.send({ type: 'chat.message', requestId: 'cleanup-text', text: 'ephemeral' });
+    await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message' && message.ackRequestId === 'cleanup-text');
+    x.send({ type: 'chat.image', requestId: 'cleanup-image', mime: 'image/png', width: 1, height: 1, byteLength: png.byteLength, data: png.toString('base64') });
+    await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.message' }> => message.type === 'chat.message' && message.ackRequestId === 'cleanup-image');
+    o.send({ type: 'chat.typing', typing: true });
+    await x.waitFor((message): message is Extract<ServerMessage, { type: 'chat.typing' }> => message.type === 'chat.typing' && message.isTyping);
+    expect(server.manager.getEphemeralStats(xSession.roomCode)).toEqual({ messages: 2, imageBytes: png.byteLength, typingTimers: 1 });
+
+    x.send({ type: 'room.leave', requestId: 'leave-now' });
+    expect((await x.waitFor(isSessionEnded)).reason).toBe('LEFT');
+    expect((await o.waitFor(isSessionEnded)).reason).toBe('LEFT');
+    expect(server.manager.getEphemeralStats(xSession.roomCode)).toBeNull();
+    expect(server.manager.size).toBe(0);
+
+    const stale = await connect();
+    stale.send({ type: 'session.resume', requestId: 'stale-token', roomCode: xSession.roomCode, playerToken: xSession.playerToken });
+    expect((await stale.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'stale-token')).code).toBe('ROOM_NOT_FOUND');
+  });
+
   it('marks a disconnect, then restores the same canonical session and board', async () => {
     const { x, o, oSession } = await createMatch();
+    x.send({ type: 'chat.message', requestId: 'chat-before-refresh', text: 'Still here' });
+    await o.waitFor(isChatMessage);
     await move(x, o, 'before-refresh', 4, 1);
     o.close();
     const paused = await x.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'paused'));
@@ -211,6 +357,8 @@ describe('real WebSocket multiplayer authority', () => {
     });
     const restored = await resumed.waitFor(isSession);
     expect(restored.playerId).toBe(oSession.playerId);
+    expect(restored.displayName).toBe(oSession.displayName);
+    expect(restored.chat.messages.some((message) => message.kind === 'text' && message.text === 'Still here')).toBe(true);
     expect(restored.snapshot.board[4]).toBe('X');
     expect(restored.snapshot.phase).toBe('active');
     expect(restored.snapshot.turn).toBe('O');
@@ -220,7 +368,7 @@ describe('real WebSocket multiplayer authority', () => {
 
   it('lets a valid resume supersede an older socket for the same player', async () => {
     const original = await connect();
-    original.send({ type: 'room.create', requestId: 'original-room', name: 'Ada' });
+    original.send({ type: 'room.create', requestId: 'original-room' });
     const session = await original.waitFor(isSession);
     const oldSocketClosed = new Promise<number>((resolve) => original.socket.once('close', resolve));
 
@@ -239,7 +387,7 @@ describe('real WebSocket multiplayer authority', () => {
 
   it('cleans up a completely empty room', async () => {
     const player = await connect();
-    player.send({ type: 'room.create', requestId: 'empty-room', name: 'Ada' });
+    player.send({ type: 'room.create', requestId: 'empty-room' });
     await player.waitFor(isSession);
     expect(server.manager.size).toBe(1);
     player.close();

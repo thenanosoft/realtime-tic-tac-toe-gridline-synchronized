@@ -8,7 +8,9 @@
   "scripts": {
     "dev": "concurrently -k -n web,ws -c cyan,magenta \"vinext dev\" \"tsx watch server/index.ts\"",
     "build": "vinext build",
+    "build:pages": "next build",
     "start": "concurrently -k -n web,ws -c cyan,magenta \"vinext start\" \"tsx server/index.ts\"",
+    "start:server": "tsx server/index.ts",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next --ignore-pattern coverage",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",

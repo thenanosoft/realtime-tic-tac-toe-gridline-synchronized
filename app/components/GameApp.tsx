@@ -41,6 +41,17 @@ export function GameApp() {
           onMove={game.move}
           onRematch={game.voteRematch}
           playSound={sound.play}
+          chatMessages={game.chatMessages}
+          typingPlayerId={game.typingPlayerId}
+          quickReactions={game.quickReactions}
+          imagePreparing={game.imagePreparing}
+          onSendText={game.sendChatMessage}
+          onTyping={game.setTyping}
+          onSticker={game.sendSticker}
+          onQuickReaction={game.sendQuickReaction}
+          onMessageReaction={game.toggleMessageReaction}
+          onImage={game.sendImage}
+          onLeave={game.leaveRoom}
         />
       )}
       {game.session && !game.snapshot && (

@@ -1,9 +1,28 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { applyMove, createInitialGame, GameRuleError, type EngineState, type Mark } from '../../shared/game';
-import type { RoomPhase, RoomSnapshot, ServerMessage } from '../../shared/protocol';
+import {
+  CHAT_HISTORY_LIMIT,
+  MAX_CHAT_IMAGE_BYTES,
+  MAX_CHAT_IMAGE_DIMENSION,
+  MAX_CHAT_TEXT_LENGTH,
+  ROOM_IMAGE_MEMORY_LIMIT,
+  type ChatMessageSnapshot,
+  type ChatReactionSnapshot,
+  type ChatSnapshot,
+  type MessageReaction,
+  type QuickReaction,
+  type RoomPhase,
+  type RoomSnapshot,
+  type ServerMessage,
+  type StickerId,
+  type SupportedImageMime,
+} from '../../shared/protocol';
 import { CommandError } from '../errors';
+import { generateTemporaryName } from './identity';
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+
+type RateBucket = 'chat' | 'reaction' | 'typing' | 'image';
 
 export interface Peer {
   id: string;
@@ -20,7 +39,28 @@ interface Player {
   reconnectDeadline: number | null;
   peer: Peer | null;
   seenRequests: Set<string>;
+  rateLimits: Record<RateBucket, number[]>;
 }
+
+interface StoredChatBase {
+  id: string;
+  requestId: string;
+  senderId: string;
+  createdAt: number;
+  reactions: Map<MessageReaction, Set<string>>;
+}
+
+type StoredChatMessage =
+  | (StoredChatBase & { kind: 'text'; text: string })
+  | (StoredChatBase & { kind: 'sticker'; stickerId: StickerId })
+  | (StoredChatBase & {
+      kind: 'image';
+      mime: SupportedImageMime;
+      width: number;
+      height: number;
+      byteLength: number;
+      data: string;
+    });
 
 interface Room {
   code: string;
@@ -35,14 +75,20 @@ interface Room {
   createdAt: number;
   updatedAt: number;
   startTimer: ReturnType<typeof setTimeout> | null;
+  chatMessages: StoredChatMessage[];
+  chatImageBytes: number;
+  typing: Map<string, number>;
+  typingTimers: Map<string, ReturnType<typeof setTimeout>>;
 }
 
 export interface RoomManagerOptions {
   countdownMs?: number;
   reconnectGraceMs?: number;
   emptyRoomTtlMs?: number;
+  waitingRoomTtlMs?: number;
   reservationTtlMs?: number;
   cleanupIntervalMs?: number;
+  typingTtlMs?: number;
   now?: () => number;
 }
 
@@ -50,8 +96,10 @@ export interface SessionResult {
   roomCode: string;
   playerToken: string;
   playerId: string;
+  displayName: string;
   mark: Mark;
   snapshot: RoomSnapshot;
+  chat: ChatSnapshot;
 }
 
 export class RoomManager {
@@ -60,29 +108,30 @@ export class RoomManager {
   private readonly countdownMs: number;
   private readonly reconnectGraceMs: number;
   private readonly emptyRoomTtlMs: number;
+  private readonly waitingRoomTtlMs: number;
   private readonly reservationTtlMs: number;
+  private readonly typingTtlMs: number;
   private readonly cleanupTimer: ReturnType<typeof setInterval>;
   private readonly now: () => number;
 
   constructor(options: RoomManagerOptions = {}) {
     this.countdownMs = options.countdownMs ?? 2_600;
-    this.reconnectGraceMs = options.reconnectGraceMs ?? 15_000;
-    this.emptyRoomTtlMs = options.emptyRoomTtlMs ?? 60_000;
+    this.reconnectGraceMs = options.reconnectGraceMs ?? 90_000;
+    this.emptyRoomTtlMs = options.emptyRoomTtlMs ?? 90_000;
+    this.waitingRoomTtlMs = options.waitingRoomTtlMs ?? 10 * 60_000;
     this.reservationTtlMs = options.reservationTtlMs ?? 10 * 60_000;
+    this.typingTtlMs = options.typingTtlMs ?? 2_500;
     this.now = options.now ?? Date.now;
-    this.cleanupTimer = setInterval(
-      () => this.sweep(),
-      options.cleanupIntervalMs ?? 15_000,
-    );
+    this.cleanupTimer = setInterval(() => this.sweep(), options.cleanupIntervalMs ?? 15_000);
     this.cleanupTimer.unref?.();
   }
 
-  createRoom(name: string, peer: Peer): SessionResult {
+  createRoom(peer: Peer): SessionResult {
     if (this.connectionIndex.has(peer.id)) {
       throw new CommandError('ALREADY_IN_ROOM', 'This connection already belongs to a room.');
     }
     const code = this.generateRoomCode();
-    const player = this.createPlayer(name, 'X', peer);
+    const player = this.createPlayer('X', peer, new Set());
     const timestamp = this.now();
     const room: Room = {
       code,
@@ -97,13 +146,17 @@ export class RoomManager {
       createdAt: timestamp,
       updatedAt: timestamp,
       startTimer: null,
+      chatMessages: [],
+      chatImageBytes: 0,
+      typing: new Map(),
+      typingTimers: new Map(),
     };
     this.rooms.set(code, room);
     this.connectionIndex.set(peer.id, { roomCode: code, playerId: player.id });
     return this.sessionResult(room, player);
   }
 
-  joinRoom(code: string, name: string, peer: Peer): SessionResult {
+  joinRoom(code: string, peer: Peer): SessionResult {
     if (this.connectionIndex.has(peer.id)) {
       throw new CommandError('ALREADY_IN_ROOM', 'This connection already belongs to a room.');
     }
@@ -111,7 +164,8 @@ export class RoomManager {
     if (room.players.size >= 2) {
       throw new CommandError('ROOM_FULL', 'This room already has two players.');
     }
-    const player = this.createPlayer(name, 'O', peer);
+    const names = new Set([...room.players.values()].map((player) => player.name));
+    const player = this.createPlayer('O', peer, names);
     room.players.set(player.id, player);
     this.connectionIndex.set(peer.id, { roomCode: room.code, playerId: player.id });
     this.beginCountdown(room);
@@ -124,9 +178,7 @@ export class RoomManager {
     }
     const room = this.requireRoom(code);
     const player = [...room.players.values()].find((candidate) => candidate.token === token);
-    if (!player) {
-      throw new CommandError('INVALID_SESSION', 'This player session is no longer valid.');
-    }
+    if (!player) throw new CommandError('INVALID_SESSION', 'This player session is no longer valid.');
 
     if (player.peer && player.peer.id !== peer.id) {
       this.connectionIndex.delete(player.peer.id);
@@ -138,9 +190,8 @@ export class RoomManager {
     this.connectionIndex.set(peer.id, { roomCode: room.code, playerId: player.id });
 
     if (room.phase === 'paused' && this.allPlayersConnected(room)) {
-      if (room.pausedFrom === 'countdown') {
-        this.beginCountdown(room);
-      } else {
+      if (room.pausedFrom === 'countdown') this.beginCountdown(room);
+      else {
         room.phase = 'active';
         room.pausedFrom = null;
         this.bump(room);
@@ -149,6 +200,11 @@ export class RoomManager {
       this.bump(room);
     }
     return this.sessionResult(room, player);
+  }
+
+  leaveRoom(peerId: string): void {
+    const { room } = this.requireMembership(peerId);
+    this.destroyRoom(room.code, 'LEFT', 'This private session has ended.');
   }
 
   move(peerId: string, requestId: string, cell: number, expectedVersion: number): void {
@@ -167,23 +223,17 @@ export class RoomManager {
         room.phase === 'paused' ? 'The match is paused while a player reconnects.' : 'The match is not active yet.',
       );
     }
-    if (!this.allPlayersConnected(room)) {
-      throw new CommandError('OPPONENT_OFFLINE', 'Wait for your opponent to reconnect.');
-    }
+    if (!this.allPlayersConnected(room)) throw new CommandError('OPPONENT_OFFLINE', 'Wait for your opponent to reconnect.');
     try {
       room.game = applyMove(room.game, player.mark, cell);
     } catch (error) {
-      if (error instanceof GameRuleError) {
-        throw new CommandError(error.code, error.message);
-      }
+      if (error instanceof GameRuleError) throw new CommandError(error.code, error.message);
       throw error;
     }
     this.remember(player, requestId);
-    if (room.game.winner || room.game.isDraw) {
-      room.phase = 'game_over';
-    }
+    if (room.game.winner || room.game.isDraw) room.phase = 'game_over';
     this.bump(room);
-    this.broadcast(room, requestId);
+    this.broadcastGame(room, requestId);
   }
 
   voteRematch(peerId: string, requestId: string): void {
@@ -203,8 +253,7 @@ export class RoomManager {
     room.rematchVotes.add(player.id);
 
     if (room.rematchVotes.size === 2 && this.allPlayersConnected(room)) {
-      const players = [...room.players.values()];
-      for (const candidate of players) {
+      for (const candidate of room.players.values()) {
         candidate.mark = candidate.mark === 'X' ? 'O' : 'X';
         candidate.seenRequests.clear();
       }
@@ -216,7 +265,123 @@ export class RoomManager {
       room.phase = 'rematch_waiting';
       this.bump(room);
     }
-    this.broadcast(room, requestId);
+    this.broadcastGame(room, requestId);
+  }
+
+  sendChatMessage(peerId: string, requestId: string, text: string): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    this.checkRate(player, 'chat', 12, 8_000);
+    const normalized = text.trim();
+    if (!normalized) throw new CommandError('INVALID_CHAT', 'Write a message before sending.');
+    if (normalized.length > MAX_CHAT_TEXT_LENGTH) {
+      throw new CommandError('MESSAGE_TOO_LONG', `Messages can contain up to ${MAX_CHAT_TEXT_LENGTH} characters.`);
+    }
+    const duplicate = this.findDuplicateMessage(room, player.id, requestId);
+    if (duplicate) {
+      player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(duplicate), ackRequestId: requestId });
+      return;
+    }
+    const message: StoredChatMessage = {
+      id: randomUUID(), requestId, senderId: player.id, kind: 'text', text: normalized,
+      createdAt: this.now(), reactions: new Map(),
+    };
+    this.storeAndBroadcastMessage(room, player, message);
+  }
+
+  sendSticker(peerId: string, requestId: string, stickerId: StickerId): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    this.checkRate(player, 'chat', 12, 8_000);
+    const duplicate = this.findDuplicateMessage(room, player.id, requestId);
+    if (duplicate) {
+      player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(duplicate), ackRequestId: requestId });
+      return;
+    }
+    const message: StoredChatMessage = {
+      id: randomUUID(), requestId, senderId: player.id, kind: 'sticker', stickerId,
+      createdAt: this.now(), reactions: new Map(),
+    };
+    this.storeAndBroadcastMessage(room, player, message);
+  }
+
+  sendImage(
+    peerId: string,
+    requestId: string,
+    image: { mime: SupportedImageMime; width: number; height: number; byteLength: number; data: string },
+  ): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    this.checkRate(player, 'image', 3, 30_000);
+    const duplicate = this.findDuplicateMessage(room, player.id, requestId);
+    if (duplicate) {
+      player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(duplicate), ackRequestId: requestId });
+      return;
+    }
+    const bytes = this.validateImage(image.mime, image.width, image.height, image.byteLength, image.data);
+    if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
+      throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
+    }
+    const message: StoredChatMessage = {
+      id: randomUUID(), requestId, senderId: player.id, kind: 'image', ...image,
+      byteLength: bytes.byteLength, createdAt: this.now(), reactions: new Map(),
+    };
+    this.storeAndBroadcastMessage(room, player, message);
+  }
+
+  setTyping(peerId: string, typing: boolean): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    this.checkRate(player, 'typing', 12, 5_000);
+    if (!typing) {
+      this.clearTyping(room, player.id, true);
+      return;
+    }
+    const expiresAt = this.now() + this.typingTtlMs;
+    room.typing.set(player.id, expiresAt);
+    const previousTimer = room.typingTimers.get(player.id);
+    if (previousTimer) clearTimeout(previousTimer);
+    const timer = setTimeout(() => {
+      room.typingTimers.delete(player.id);
+      if (!this.rooms.has(room.code) || (room.typing.get(player.id) ?? 0) > this.now()) return;
+      room.typing.delete(player.id);
+      this.broadcastChat(room, { type: 'chat.typing', playerId: player.id, isTyping: false, expiresAt: null });
+    }, this.typingTtlMs + 25);
+    timer.unref?.();
+    room.typingTimers.set(player.id, timer);
+    room.updatedAt = this.now();
+    this.broadcastChat(room, { type: 'chat.typing', playerId: player.id, isTyping: true, expiresAt });
+  }
+
+  toggleMessageReaction(peerId: string, requestId: string, messageId: string, reaction: MessageReaction): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    this.checkRate(player, 'reaction', 20, 5_000);
+    const message = room.chatMessages.find((candidate) => candidate.id === messageId);
+    if (!message) throw new CommandError('INVALID_REACTION', 'That message is no longer available.');
+    if (player.seenRequests.has(requestId)) {
+      player.peer?.send({
+        type: 'chat.message-reaction', messageId, reactions: this.reactionSnapshot(message), ackRequestId: requestId,
+      });
+      return;
+    }
+    const players = message.reactions.get(reaction) ?? new Set<string>();
+    if (players.has(player.id)) players.delete(player.id);
+    else players.add(player.id);
+    if (players.size) message.reactions.set(reaction, players);
+    else message.reactions.delete(reaction);
+    this.remember(player, requestId);
+    room.updatedAt = this.now();
+    this.broadcastChat(room, {
+      type: 'chat.message-reaction', messageId, reactions: this.reactionSnapshot(message), ackRequestId: requestId,
+    });
+  }
+
+  sendQuickReaction(peerId: string, requestId: string, reaction: QuickReaction): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    this.checkRate(player, 'reaction', 20, 5_000);
+    if (player.seenRequests.has(requestId)) return;
+    this.remember(player, requestId);
+    room.updatedAt = this.now();
+    this.broadcastChat(room, {
+      type: 'chat.quick-reaction', id: randomUUID(), senderId: player.id, reaction,
+      createdAt: this.now(), ackRequestId: requestId,
+    });
   }
 
   disconnect(peerId: string): void {
@@ -230,6 +395,7 @@ export class RoomManager {
     player.peer = null;
     player.connected = false;
     player.reconnectDeadline = this.now() + this.reconnectGraceMs;
+    this.clearTyping(room, player.id, true);
     if (room.phase === 'countdown' || room.phase === 'active') {
       room.pausedFrom = room.phase;
       room.phase = 'paused';
@@ -237,7 +403,7 @@ export class RoomManager {
       this.clearStartTimer(room);
     }
     this.bump(room);
-    this.broadcast(room);
+    this.broadcastGame(room);
   }
 
   touch(peerId: string): void {
@@ -247,12 +413,16 @@ export class RoomManager {
   }
 
   broadcastForPeer(peerId: string): void {
-    const { room } = this.requireMembership(peerId);
-    this.broadcast(room);
+    this.broadcastGame(this.requireMembership(peerId).room);
   }
 
   getSnapshotForPeer(peerId: string): RoomSnapshot {
     return this.snapshot(this.requireMembership(peerId).room);
+  }
+
+  getEphemeralStats(code: string): { messages: number; imageBytes: number; typingTimers: number } | null {
+    const room = this.rooms.get(code.toUpperCase());
+    return room ? { messages: room.chatMessages.length, imageBytes: room.chatImageBytes, typingTimers: room.typingTimers.size } : null;
   }
 
   get size(): number {
@@ -261,9 +431,42 @@ export class RoomManager {
 
   close(): void {
     clearInterval(this.cleanupTimer);
-    for (const room of this.rooms.values()) this.clearStartTimer(room);
-    this.rooms.clear();
+    for (const code of [...this.rooms.keys()]) {
+      this.destroyRoom(code, 'SERVER_SHUTDOWN', 'The realtime service is restarting.');
+    }
     this.connectionIndex.clear();
+  }
+
+  destroyRoom(code: string, reason: 'LEFT' | 'EXPIRED' | 'SERVER_SHUTDOWN', message: string): void {
+    const room = this.rooms.get(code.toUpperCase());
+    if (!room) return;
+    this.clearStartTimer(room);
+    for (const timer of room.typingTimers.values()) clearTimeout(timer);
+    room.typingTimers.clear();
+    room.typing.clear();
+
+    for (const player of room.players.values()) {
+      if (player.peer) {
+        this.connectionIndex.delete(player.peer.id);
+        player.peer.send({ type: 'session.ended', reason, message });
+      }
+      player.token = '';
+      player.seenRequests.clear();
+      for (const entries of Object.values(player.rateLimits)) entries.length = 0;
+      player.peer = null;
+      player.connected = false;
+    }
+
+    for (const chatMessage of room.chatMessages) {
+      chatMessage.reactions.clear();
+      if (chatMessage.kind === 'image') chatMessage.data = '';
+    }
+    room.chatMessages.length = 0;
+    room.chatImageBytes = 0;
+    room.rematchVotes.clear();
+    room.game.board.fill(null);
+    room.players.clear();
+    this.rooms.delete(room.code);
   }
 
   private beginCountdown(room: Room): void {
@@ -284,13 +487,69 @@ export class RoomManager {
       }
       room.countdownEndsAt = null;
       this.bump(room);
-      this.broadcast(room);
+      this.broadcastGame(room);
     }, this.countdownMs);
     room.startTimer.unref?.();
   }
 
-  private broadcast(room: Room, ackRequestId?: string): void {
+  private storeAndBroadcastMessage(room: Room, player: Player, message: StoredChatMessage): void {
+    this.remember(player, message.requestId);
+    room.chatMessages.push(message);
+    if (message.kind === 'image') room.chatImageBytes += message.byteLength;
+    this.pruneChat(room);
+    room.updatedAt = this.now();
+    this.broadcastChat(room, { type: 'chat.message', message: this.messageSnapshot(message), ackRequestId: message.requestId });
+  }
+
+  private pruneChat(room: Room): void {
+    while (room.chatMessages.length > CHAT_HISTORY_LIMIT || room.chatImageBytes > ROOM_IMAGE_MEMORY_LIMIT) {
+      const removed = room.chatMessages.shift();
+      if (!removed) return;
+      removed.reactions.clear();
+      if (removed.kind === 'image') {
+        room.chatImageBytes -= removed.byteLength;
+        removed.data = '';
+      }
+    }
+  }
+
+  private validateImage(
+    mime: SupportedImageMime,
+    width: number,
+    height: number,
+    byteLength: number,
+    data: string,
+  ): Buffer {
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new CommandError('INVALID_IMAGE', 'Image data is malformed.');
+    const bytes = Buffer.from(data, 'base64');
+    if (!bytes.byteLength || bytes.byteLength !== byteLength || bytes.toString('base64') !== data) {
+      throw new CommandError('INVALID_IMAGE', 'Image data does not match its metadata.');
+    }
+    const inspected = inspectImage(bytes);
+    if (!inspected || inspected.mime !== mime) {
+      throw new CommandError('INVALID_IMAGE', 'Image contents do not match the selected format.');
+    }
+    if (
+      inspected.width !== width
+      || inspected.height !== height
+      || inspected.width > MAX_CHAT_IMAGE_DIMENSION
+      || inspected.height > MAX_CHAT_IMAGE_DIMENSION
+    ) {
+      throw new CommandError('INVALID_IMAGE', 'Image dimensions do not match the prepared attachment.');
+    }
+    return bytes;
+  }
+
+  private findDuplicateMessage(room: Room, playerId: string, requestId: string): StoredChatMessage | undefined {
+    return room.chatMessages.find((message) => message.senderId === playerId && message.requestId === requestId);
+  }
+
+  private broadcastGame(room: Room, ackRequestId?: string): void {
     const message: ServerMessage = { type: 'game.snapshot', snapshot: this.snapshot(room), ackRequestId };
+    for (const player of room.players.values()) player.peer?.send(message);
+  }
+
+  private broadcastChat(room: Room, message: ServerMessage): void {
     for (const player of room.players.values()) player.peer?.send(message);
   }
 
@@ -320,26 +579,63 @@ export class RoomManager {
     };
   }
 
+  private chatSnapshot(room: Room): ChatSnapshot {
+    const timestamp = this.now();
+    return {
+      messages: room.chatMessages.map((message) => this.messageSnapshot(message)),
+      typing: [...room.typing.entries()]
+        .filter(([, expiresAt]) => expiresAt > timestamp)
+        .map(([playerId, expiresAt]) => ({ playerId, expiresAt })),
+    };
+  }
+
+  private messageSnapshot(message: StoredChatMessage): ChatMessageSnapshot {
+    const base = {
+      id: message.id,
+      senderId: message.senderId,
+      createdAt: message.createdAt,
+      reactions: this.reactionSnapshot(message),
+    };
+    if (message.kind === 'text') return { ...base, kind: 'text', text: message.text };
+    if (message.kind === 'sticker') return { ...base, kind: 'sticker', stickerId: message.stickerId };
+    return {
+      ...base,
+      kind: 'image',
+      mime: message.mime,
+      width: message.width,
+      height: message.height,
+      byteLength: message.byteLength,
+      data: message.data,
+    };
+  }
+
+  private reactionSnapshot(message: StoredChatMessage): ChatReactionSnapshot[] {
+    return [...message.reactions.entries()].map(([reaction, playerIds]) => ({ reaction, playerIds: [...playerIds] }));
+  }
+
   private sessionResult(room: Room, player: Player): SessionResult {
     return {
       roomCode: room.code,
       playerToken: player.token,
       playerId: player.id,
+      displayName: player.name,
       mark: player.mark,
       snapshot: this.snapshot(room),
+      chat: this.chatSnapshot(room),
     };
   }
 
-  private createPlayer(name: string, mark: Mark, peer: Peer): Player {
+  private createPlayer(mark: Mark, peer: Peer, excludedNames: ReadonlySet<string>): Player {
     return {
       id: randomUUID(),
       token: `${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`,
-      name: name.trim().slice(0, 24),
+      name: generateTemporaryName(excludedNames),
       mark,
       connected: true,
       reconnectDeadline: null,
       peer,
       seenRequests: new Set(),
+      rateLimits: { chat: [], reaction: [], typing: [], image: [] },
     };
   }
 
@@ -360,6 +656,14 @@ export class RoomManager {
     return { room, player };
   }
 
+  private requireChatMembership(peerId: string): { room: Room; player: Player } {
+    const membership = this.requireMembership(peerId);
+    if (membership.room.players.size !== 2) {
+      throw new CommandError('GAME_NOT_ACTIVE', 'Private chat opens when your opponent joins.');
+    }
+    return membership;
+  }
+
   private allPlayersConnected(room: Room): boolean {
     return room.players.size === 2 && [...room.players.values()].every((player) => player.connected);
   }
@@ -371,9 +675,27 @@ export class RoomManager {
 
   private remember(player: Player, requestId: string): void {
     player.seenRequests.add(requestId);
-    if (player.seenRequests.size > 64) {
+    if (player.seenRequests.size > 128) {
       const oldest = player.seenRequests.values().next().value;
       if (oldest) player.seenRequests.delete(oldest);
+    }
+  }
+
+  private checkRate(player: Player, bucket: RateBucket, limit: number, windowMs: number): void {
+    const timestamp = this.now();
+    const entries = player.rateLimits[bucket].filter((entry) => timestamp - entry < windowMs);
+    entries.push(timestamp);
+    player.rateLimits[bucket] = entries;
+    if (entries.length > limit) throw new CommandError('RATE_LIMITED', 'Slow down for a moment and try again.');
+  }
+
+  private clearTyping(room: Room, playerId: string, broadcast: boolean): void {
+    const timer = room.typingTimers.get(playerId);
+    if (timer) clearTimeout(timer);
+    room.typingTimers.delete(playerId);
+    const hadTyping = room.typing.delete(playerId);
+    if (hadTyping && broadcast) {
+      this.broadcastChat(room, { type: 'chat.typing', playerId, isTyping: false, expiresAt: null });
     }
   }
 
@@ -394,21 +716,119 @@ export class RoomManager {
 
   private sweep(): void {
     const timestamp = this.now();
-    for (const room of this.rooms.values()) {
+    for (const room of [...this.rooms.values()]) {
       const players = [...room.players.values()];
       const allOffline = players.every((player) => !player.connected);
       const offlineTooLong = players.some(
         (player) => !player.connected && player.reconnectDeadline !== null && timestamp - player.reconnectDeadline > this.reservationTtlMs,
       );
-      if ((allOffline && timestamp - room.updatedAt >= this.emptyRoomTtlMs) || offlineTooLong) {
-        for (const player of players) {
-          player.peer?.send({ type: 'server.notice', code: 'ROOM_EXPIRED', message: 'This inactive room has expired.' });
-          player.peer?.close(4004, 'Room expired');
-          if (player.peer) this.connectionIndex.delete(player.peer.id);
-        }
-        this.clearStartTimer(room);
-        this.rooms.delete(room.code);
+      const ttl = players.length === 1 ? this.waitingRoomTtlMs : this.emptyRoomTtlMs;
+      if ((allOffline && timestamp - room.updatedAt >= ttl) || offlineTooLong) {
+        this.destroyRoom(room.code, 'EXPIRED', 'This inactive private session has expired.');
       }
     }
   }
+}
+
+function inspectImage(bytes: Uint8Array): { mime: SupportedImageMime; width: number; height: number } | null {
+  if (
+    bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
+    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+    && ascii(bytes, 12, 16) === 'IHDR'
+  ) {
+    return { mime: 'image/png', width: uint32Be(bytes, 16), height: uint32Be(bytes, 20) };
+  }
+
+  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let offset = 2;
+    const startOfFrameMarkers = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
+    while (offset + 8 < bytes.length) {
+      if (bytes[offset] !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      const marker = bytes[offset + 1];
+      if (marker === 0xd8 || marker === 0xd9) {
+        offset += 2;
+        continue;
+      }
+      if (marker === 0xda) break;
+      const segmentLength = uint16Be(bytes, offset + 2);
+      if (segmentLength < 2 || offset + 2 + segmentLength > bytes.length) break;
+      if (startOfFrameMarkers.has(marker) && segmentLength >= 7) {
+        return {
+          mime: 'image/jpeg',
+          width: uint16Be(bytes, offset + 7),
+          height: uint16Be(bytes, offset + 5),
+        };
+      }
+      offset += 2 + segmentLength;
+    }
+    return null;
+  }
+
+  if (
+    bytes.length >= 30
+    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
+    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  ) {
+    const chunkType = ascii(bytes, 12, 16);
+    if (chunkType === 'VP8X') {
+      return {
+        mime: 'image/webp',
+        width: uint24Le(bytes, 24) + 1,
+        height: uint24Le(bytes, 27) + 1,
+      };
+    }
+    if (chunkType === 'VP8 ' && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+      return {
+        mime: 'image/webp',
+        width: uint16Le(bytes, 26) & 0x3fff,
+        height: uint16Le(bytes, 28) & 0x3fff,
+      };
+    }
+    if (chunkType === 'VP8L' && bytes[20] === 0x2f) {
+      const dimensions = uint32Le(bytes, 21);
+      return {
+        mime: 'image/webp',
+        width: (dimensions & 0x3fff) + 1,
+        height: ((dimensions >>> 14) & 0x3fff) + 1,
+      };
+    }
+  }
+  return null;
+}
+
+function ascii(bytes: Uint8Array, start: number, end: number): string {
+  return String.fromCharCode(...bytes.subarray(start, end));
+}
+
+function uint16Be(bytes: Uint8Array, offset: number): number {
+  return (bytes[offset] << 8) | bytes[offset + 1];
+}
+
+function uint16Le(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] | (bytes[offset + 1] << 8);
+}
+
+function uint24Le(bytes: Uint8Array, offset: number): number {
+  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
+}
+
+function uint32Be(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset] * 0x1000000
+    + (bytes[offset + 1] << 16)
+    + (bytes[offset + 2] << 8)
+    + bytes[offset + 3]
+  ) >>> 0;
+}
+
+function uint32Le(bytes: Uint8Array, offset: number): number {
+  return (
+    bytes[offset]
+    + (bytes[offset + 1] << 8)
+    + (bytes[offset + 2] << 16)
+    + bytes[offset + 3] * 0x1000000
+  ) >>> 0;
 }

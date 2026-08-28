@@ -1,12 +1,12 @@
 import type { Mark } from '../../shared/game';
 
 const SESSION_KEY = 'gridline.session.v1';
-const NAME_KEY = 'gridline.player-name';
 
 export interface StoredSession {
   roomCode: string;
   playerToken: string;
   playerId: string;
+  displayName: string;
   mark: Mark;
 }
 
@@ -21,7 +21,7 @@ export function loadSession(): StoredSession | null {
       typeof parsed.playerId === 'string' &&
       (parsed.mark === 'X' || parsed.mark === 'O')
     ) {
-      return parsed as StoredSession;
+      return { ...parsed, displayName: typeof parsed.displayName === 'string' ? parsed.displayName : '' } as StoredSession;
     }
   } catch {
     // Corrupt device state is discarded; the server still validates every token.
@@ -36,13 +36,4 @@ export function saveSession(session: StoredSession): void {
 
 export function clearSession(): void {
   sessionStorage.removeItem(SESSION_KEY);
-}
-
-export function loadPlayerName(): string {
-  if (typeof window === 'undefined') return '';
-  return localStorage.getItem(NAME_KEY)?.slice(0, 24) ?? '';
-}
-
-export function savePlayerName(name: string): void {
-  localStorage.setItem(NAME_KEY, name.slice(0, 24));
 }
