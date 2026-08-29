@@ -19,7 +19,9 @@ PATH. Fixed as follows:
 1. **Git installed properly.** `winget install --id Git.Git --scope user` → Git **2.55.0.3** at
    `C:\Program Files\Git\cmd`, added to the machine PATH by its own installer. Flutter's bundled
    MinGit at `D:\Android\flutter\bin\mingit\cmd\git.exe` was found first but is **git 2.15.1
-   from 2017** — too old to rely on, so it is deliberately placed *after* the real Git on PATH.
+   from 2017** — too old to rely on. Only `D:\Android\flutter\bin` was added to PATH, not the
+   nested `mingit\cmd`, so that binary stays invisible to `git` lookups and cannot shadow the
+   real one.
 2. **User PATH extended** (persistent, `HKCU\Environment`, written as `REG_EXPAND_SZ`; the
    previous value is backed up in the session scratchpad as `user-path-backup.txt`):
 
