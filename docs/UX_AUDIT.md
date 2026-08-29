@@ -6,6 +6,11 @@ to [TODO.md](./TODO.md).
 
 Severity: **S1** breaks the experience · **S2** clearly noticeable · **S3** polish
 
+**Status after Phase 1:** S1-A, S1-B, S2-A, S2-B, S2-C, S2-D and S2-F are fixed and covered by
+regression tests in `tests/styles.test.ts`. S2-E was investigated and withdrawn — it was not a
+real defect. S1-C is deliberately deferred to Phase 11, where the reduced-motion state is
+designed alongside the accessibility pass. The S3 items remain open.
+
 ---
 
 ## S1-A — The board rearranges itself as the game is played · `P1-01`
@@ -133,17 +138,33 @@ But `.game-status` only sets `min-height: 76px` (line 749) while `.status-copy p
 variable-length text, and `.rematch-button` appears and disappears between phases. Status text
 changing length nudges the surrounding layout. Reserve the space explicitly.
 
-## S2-E — Diagonal winning lines are clipped · `P1-09`
+## ~~S2-E — Diagonal winning lines are clipped~~ · **WITHDRAWN, not a defect** · `P1-09`
 
-`.game-board` sets `overflow: hidden` (line 645). `.line-0-4-8` and `.line-2-4-6` are
-`width: 119%` rotated 45°/135° (lines 726-727), so their ends extend past the board box and
-are cut off. The diagonals visibly stop short of the corner cells.
+This finding was wrong and is retained here rather than deleted, because a withdrawn finding
+is part of the record.
+
+The claim was that `overflow: hidden` on `.game-board` clips the 45°/135° winning lines. Working
+the geometry through: the line is `width: 119%`, `transform-origin: left center`, anchored at
+`left: 8%; top: 8%`. Rotating by 45° puts the far end at
+`0.08S + 1.19S·cos45° = 0.9214S` on both axes, for a board of side `S`. That is inside the
+`0…S` box, with room to spare — and the 18px glow at a 600px board reaches 570px, still inside.
+
+The diagonals were never clipped. No change was made.
 
 ## S2-F — Contrast failures · `P1-13`
 
-`--dim: #5c5e5d` on `--night: #08090b` is roughly 4.0:1 — below WCAG AA 4.5:1 for the small
-text it is used on. `.board-meta` at `#5f615f` and `.countdown-overlay small` at `#999b96`
-should both be re-checked once the type scale lands, since larger text changes the threshold.
+The original entry blamed `--dim: #5c5e5d`. That token turns out to be **declared but never
+used** (so is `--muted`), so it was not the problem — a reminder that reading a token block is
+not the same as reading the rules.
+
+The real failures were the literal hex values, and they were found by computing every ratio
+rather than by eye. Measured against `#101216` — the raised panel tone, which is the lighter
+of the two grounds and therefore the conservative one — thirteen foreground colours fell below
+4.5:1, the worst at **2.57:1** (`.composer-input textarea::placeholder`), with
+`.arena-axis` at 2.91:1 and `.join-row input::placeholder` at 2.61:1.
+
+All are now at or above 4.5:1, and `tests/styles.test.ts` recomputes every ratio on each run,
+so a future colour tweak cannot quietly regress below AA.
 
 ---
 

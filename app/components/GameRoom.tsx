@@ -144,7 +144,9 @@ export function GameRoom({
           </div>
           <div className="room-actions">
             <button className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
-              <span aria-hidden="true">⌁</span> Chat{unread > 0 && <b aria-label={`${unread} unread messages`}>· {unread}</b>}
+              <span aria-hidden="true">⌁</span>
+              <span className="btn-label">Chat</span>
+              {unread > 0 && <b aria-label={`${unread} unread messages`}>{unread}</b>}
             </button>
             <button className={`copy-room ${copied ? 'copied' : ''}`} onClick={copyCode} aria-label={`Copy invitation link for room ${snapshot.roomCode}`}>
               <span className="copy-icon" aria-hidden="true" />{copied ? 'Copied' : 'Copy invite'}

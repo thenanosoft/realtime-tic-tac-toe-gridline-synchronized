@@ -76,3 +76,76 @@ Phase 7 memory-budget work, where it is the number that actually matters.
 **Open decisions awaiting the user.**
 
 - D-002 — multi-tab ownership policy. Recommendation recorded; needed before Phase 4.
+
+---
+
+## 2026-08-29 — Phase 1 closed: UI/UX foundation
+
+Branch `phase/1-ui-foundation`. Gates: **46 tests pass** (up from 24), typecheck clean, lint
+clean, both builds succeed. The board fix was verified present in the *compiled* CSS, not just
+the source.
+
+### The reported bug, and what actually caused it
+
+`.game-board` declared `grid-template-columns: repeat(3, 1fr)` and **no `grid-template-rows`**.
+The three rows were implicit `auto` tracks. An empty cell has zero content height, because
+`.ghost-symbol` is absolutely positioned — so with a definite board height from
+`aspect-ratio: 1`, `align-content: stretch` split the surplus *equally* across the three auto
+tracks rather than proportionally. A row holding a mark ended up taller than an empty one, and
+the rows only equalised once all nine cells were filled.
+
+Compounding it, the gridlines were painted as fixed percentage bands on the board *background*
+(`33.15%`, `66.58%`), so they never moved while the cells did. Lines and cell boundaries drifted
+apart mid-match.
+
+Both halves are fixed: both axes are now explicit, and the lines are drawn by the cells
+themselves via `:nth-child` borders, so they cannot disagree again. `.teaser-board` on the lobby
+had the identical defect and got the identical fix.
+
+### Typography
+
+There was no type scale — every size was an independent hand-tuned pixel value, which is why
+there was never a floor to violate. 69 declarations sat between 4px and 11px, bottoming out at
+**5px** on mobile for player labels, room kicker, slot labels and state chips.
+
+A token scale now exists (`--text-micro` 11px for decorative monospace only, `--text-2xs` 12px
+through `--text-lg` 19px, plus `--tap: 44px`). All 69 declarations were migrated, and a test
+fails the build on any literal font size below 12px. The chat composer moved to 16px
+specifically because iOS Safari zooms the viewport on focus for anything smaller, which threw
+the player out of the arena mid-match.
+
+### Contrast, measured rather than eyeballed
+
+The original audit blamed `--dim: #5c5e5d`. That token turns out to be declared and **never
+used** — so did `--muted`. Computing every ratio instead found the real failures: thirteen
+foreground colours below 4.5:1 against the raised panel tone, worst at **2.57:1**. All now pass,
+and the test recomputes every ratio on each run rather than trusting a one-time sweep.
+
+### Also fixed
+
+- `font-size: 0` label-hiding replaced with a `.btn-label` collapse utility, so labels stay in
+  the accessibility tree instead of depending on an `aria-label` being present on every control.
+- Mobile tap targets raised from 25–34px to 44px, including the destructive leave-room button.
+- `.game-status` given a fixed height and its detail copy a reserved two-line box, so wrapping
+  text and the appearing rematch button can no longer nudge the board.
+- A landscape breakpoint added. There was no `orientation` query anywhere in the file; at
+  667×375 the board was sized `calc(100svh - 470px)`, which computes **negative**.
+- The connection badge keeps its word at ≤390px. It previously collapsed to a coloured dot,
+  leaving colour as the only carrier of meaning for sighted users.
+
+### One finding withdrawn
+
+The audit claimed `overflow: hidden` clipped the diagonal winning lines. Working the geometry
+through, the far end lands at `0.9214S` on a board of side `S` — comfortably inside, glow
+included. Not a defect; no change made. The entry is kept in `UX_AUDIT.md` rather than deleted,
+since a withdrawn finding is part of the record.
+
+### Carried into Phase 3
+
+`P1-02`, `P1-10` and `P1-14` all need a real layout engine — pixel-measured cell boxes, portrait
+visual confirmation, and visual snapshots. They are tracked as `P3-10` against the Playwright
+scaffold. The structural regression tests that *can* run without a browser are in place now.
+
+`S1-C` (reduced motion is a blanket `.01ms` kill switch) remains open by design: the roadmap
+puts the designed reduced-motion state in Phase 11 alongside the accessibility pass, and doing
+it properly is design work, not a CSS tweak.

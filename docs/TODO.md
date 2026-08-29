@@ -25,27 +25,39 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 1 — UI/UX foundation
 
-- [ ] **P1-01** **Board geometry.** Add `grid-template-rows: repeat(3, 1fr)` to `.game-board` and
-      make cells square-stable. Root cause of the "gridline moves until all boxes are filled" bug.
-- [ ] **P1-02** Regression test: cell bounding boxes are identical for an empty board, a
-      partially-filled board and a full board.
-- [ ] **P1-03** Move the painted gridlines off the background gradient onto real, cell-derived
-      borders so lines and cells cannot drift apart again.
-- [ ] **P1-04** Define a fluid type scale as CSS custom properties (`--text-2xs` … `--text-3xl`),
-      floor 12px for readable text, 11px for decorative monospace only.
-- [ ] **P1-05** Migrate all 69 sub-12px font declarations in `app/globals.css` to the scale.
-- [ ] **P1-06** Remove `font-size: 0` label-hiding on mobile (`.sound-toggle`, `.chat-toggle`);
-      use proper icon buttons with accessible names.
-- [ ] **P1-07** Raise mobile tap targets to ≥44×44px (currently 31–34px for copy/chat/leave).
-- [ ] **P1-08** Reserve layout space for `.game-status`, `.move-pending` and the countdown so no
-      reflow occurs mid-match.
-- [ ] **P1-09** Fix `.winning-line` diagonals being clipped by `.game-board { overflow: hidden }`.
-- [ ] **P1-10** Verify 375×667 portrait: no clipping, no horizontal scroll, board dominant.
-- [ ] **P1-11** Add a 667×375 landscape layout — no such breakpoint exists today, and
-      `min-height: calc(100svh - 64px)` will clip.
-- [ ] **P1-12** Desktop: board stays visually dominant with the chat panel open and 30 messages.
-- [ ] **P1-13** Contrast audit — `--dim: #5c5e5d` on `--night: #08090b` fails WCAG AA.
-- [ ] **P1-14** Visual snapshot tests for lobby and room at 375, 667×375, 768, 1440.
+- [x] **P1-01** **Board geometry.** `grid-template-rows: repeat(3, 1fr)` added to `.game-board`
+      and `.teaser-board`; cells given `min-height: 0`. Root cause of the "gridline moves until
+      all boxes are filled" bug.
+- [~] **P1-02** Structural regression test landed (`tests/styles.test.ts` → *board geometry*):
+      asserts both axes are explicit, no background-painted gridlines remain, and cell borders
+      draw the lines. **The pixel-measured assertion — identical cell bounding boxes at 0, 5 and
+      9 marks — needs a real layout engine and lands with the Playwright scaffold in `P3-09`.**
+- [x] **P1-03** Gridlines moved off the background gradient onto cell-derived borders
+      (`.game-cell:not(:nth-child(3n))` / `:nth-child(-n+6)`), so lines and cells cannot drift.
+- [x] **P1-04** Type scale defined as tokens: `--text-micro` (11px, decorative only) through
+      `--text-lg`, plus `--tap: 44px`.
+- [x] **P1-05** All sub-12px font declarations migrated. A test now fails the build on any
+      literal font size below 12px.
+- [x] **P1-06** `font-size: 0` label-hiding replaced with a `.btn-label` collapse utility that
+      keeps the text in the accessibility tree. Applied in GameApp, ConnectionBadge and GameRoom.
+- [x] **P1-07** Mobile tap targets raised to `var(--tap)` (44px) for copy/chat/leave, the chat
+      send button, composer tools and the image-preview close button.
+- [x] **P1-08** `.game-status` given a fixed height and `.status-copy p` a reserved two-line box,
+      so neither wrapping copy nor the rematch button can nudge the board.
+- [x] **P1-09** **Withdrawn — not a defect.** The geometry works out to `0.9214S` on a board of
+      side `S`, comfortably inside the box. See UX_AUDIT S2-E for the working. No change made.
+- [~] **P1-10** 375×667 portrait: layout corrected (board floor raised so it can no longer
+      collapse, tap targets and type fixed). **Visual confirmation deferred to `P1-14`/`P3-09`.**
+- [x] **P1-11** 667×375 landscape breakpoint added — three-column arena, board sized from
+      viewport height, status compressed to one line. The board could previously compute a
+      negative width there.
+- [x] **P1-12** Board dominance holds by construction: the chat panel is fixed-position at a
+      fixed width and its message list scrolls internally, so message count cannot feed back
+      into board size. Asserted by test.
+- [x] **P1-13** Contrast audit done by computation, not by eye. Thirteen colours were below
+      4.5:1 (worst 2.57:1); all now pass, and the test recomputes every ratio on each run.
+- [ ] **P1-14** Visual snapshot tests for lobby and room at 375, 667×375, 768, 1440. Needs the
+      Playwright scaffold from `P3-09`; carried into Phase 3.
 
 ## Phase 2 — Protocol v2
 
@@ -82,6 +94,9 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
       no invalid state reachable.
 - [ ] **P3-08** Property-based tests over `RoomManager` including reconnects and rematches.
 - [ ] **P3-09** Playwright scaffold: two browser contexts, real WebSocket, full match.
+- [ ] **P3-10** Carried over from Phase 1, because all three need a real layout engine:
+      `P1-02` (cell bounding boxes identical at 0, 5 and 9 marks), `P1-10` (375×667 portrait
+      visual confirmation) and `P1-14` (visual snapshots at 375, 667×375, 768, 1440).
 
 ## Phase 4 — Presence, identity and socket ownership
 

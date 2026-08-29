@@ -23,7 +23,8 @@ export function GameApp() {
         <span className="eyebrow">A SHARED THINKING SPACE</span>
         <div className="header-actions">
           <button className="sound-toggle" onClick={sound.toggleMuted} aria-pressed={sound.muted} aria-label={sound.muted ? 'Unmute game sounds' : 'Mute game sounds'}>
-            <span className="sound-glyph" aria-hidden="true">{sound.muted ? '×' : '•'}</span>{sound.muted ? 'Muted' : 'Sound on'}
+            <span className="sound-glyph" aria-hidden="true">{sound.muted ? '×' : '•'}</span>
+            <span className="btn-label">{sound.muted ? 'Muted' : 'Sound on'}</span>
           </button>
           <ConnectionBadge state={game.connection} />
         </div>
