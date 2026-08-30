@@ -36,6 +36,7 @@ export function GameApp() {
       {game.session && game.snapshot && (
         <GameRoom
           snapshot={game.snapshot}
+          timing={game.timing}
           session={game.session}
           connection={game.connection}
           pendingMove={game.pendingMove}

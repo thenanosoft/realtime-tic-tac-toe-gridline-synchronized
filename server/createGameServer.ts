@@ -1,7 +1,15 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { clientMessageSchema, type ClientMessage, type RejectionCode, type ServerMessage } from '../shared/protocol';
+import {
+  clientMessageSchema,
+  LEGACY_CLIENT_PROTOCOL,
+  MIN_SUPPORTED_CLIENT_PROTOCOL,
+  PROTOCOL_VERSION,
+  type ClientMessage,
+  type RejectionCode,
+  type ServerMessage,
+} from '../shared/protocol';
 import { CommandError } from './errors';
 import { RoomManager, type Peer, type RoomManagerOptions } from './rooms/RoomManager';
 
@@ -96,7 +104,13 @@ export async function createGameServer(options: GameServerOptions = {}): Promise
     const peer = new SocketPeer(randomUUID(), socket);
     const state: SocketState = { peer, messageTimes: [], alive: true };
     states.set(socket, state);
-    peer.send({ type: 'server.hello', connectionId: peer.id, serverTime: Date.now() });
+    peer.send({
+      type: 'server.hello',
+      connectionId: peer.id,
+      serverTime: Date.now(),
+      protocolVersion: PROTOCOL_VERSION,
+      minClientProtocol: MIN_SUPPORTED_CLIENT_PROTOCOL,
+    });
 
     socket.on('pong', () => {
       state.alive = true;
@@ -194,6 +208,23 @@ function handleRawMessage(raw: RawData, isBinary: boolean, state: SocketState, m
     return;
   }
 
+  // A missing protocolVersion means a client built before versioning existed.
+  // It is read as LEGACY_CLIENT_PROTOCOL and still served while that version is
+  // within the supported range, because Pages and Render deploy independently
+  // and a skew window always exists (D-004).
+  const clientProtocol = parsed.data.protocolVersion ?? LEGACY_CLIENT_PROTOCOL;
+  if (clientProtocol < MIN_SUPPORTED_CLIENT_PROTOCOL || clientProtocol > PROTOCOL_VERSION) {
+    reject(
+      state.peer,
+      'requestId' in parsed.data ? parsed.data.requestId : undefined,
+      'PROTOCOL_MISMATCH',
+      clientProtocol > PROTOCOL_VERSION
+        ? 'This client speaks a newer protocol than the server. The realtime service is still updating.'
+        : 'This version of Gridline is too old for the realtime service. Refresh the page to continue.',
+    );
+    return;
+  }
+
   try {
     dispatch(parsed.data, state.peer, manager);
   } catch (error) {
@@ -229,7 +260,7 @@ function dispatch(message: ClientMessage, peer: SocketPeer, manager: RoomManager
       return;
     }
     case 'game.move':
-      manager.move(peer.id, message.requestId, message.cell, message.expectedVersion);
+      manager.move(peer.id, message.requestId, message.cell, message.expectedRevision);
       return;
     case 'rematch.vote':
       manager.voteRematch(peer.id, message.requestId);

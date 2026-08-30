@@ -32,25 +32,57 @@ Gridline is a server-authoritative, two-player Tic-Tac-Toe game with temporary p
 
 `shared/protocol.ts` contains the discriminated client schema, server union, snapshots, limits, sticker/reaction allowlists, and rejection codes. `shared/game.ts` remains the pure tested game engine.
 
+The wire protocol is at **version 2**. Every client command may carry an optional
+`protocolVersion`; its absence is read as version 1 so a client built before
+versioning still works. `server.hello` advertises the server's `protocolVersion`
+and `minClientProtocol`, and a client outside that range is told to refresh
+rather than left to fail silently.
+
+**Ordering.** Nothing on the client is ordered by arrival or by a clock.
+
+- Every authoritative game update carries a strictly increasing `revision`. A
+  client never applies a snapshot whose revision is not greater than the one it
+  holds, so a delayed packet cannot overwrite newer state.
+- Every chat event - message, typing, reaction - carries a `sequence` from one
+  monotonic per-room stream. Events that *overwrite* state (typing, reaction
+  sets) are discarded when stale; messages, which *append*, are never dropped
+  for being late, only inserted at the position their sequence names.
+- `RoomSnapshot` is a pure function of the room at a revision, so two clients at
+  the same revision hold byte-identical state. Anything time-dependent lives in
+  a separate `timing` envelope on the message.
+
+**Clocks.** Deadlines travel as durations (`countdownMsRemaining`,
+`reconnect[].msRemaining`), never as absolute epochs. The countdown is rendered
+from `performance.now()`, which is monotonic, so a device with a wrong clock
+still sees the correct timing.
+
+**Idempotency.** Each player holds a TTL-bounded request ledger. A command
+replayed with the same `requestId` is never executed twice; the recorded outcome
+is rebuilt from current room state and returned, so a client that retried after a
+timeout receives the answer it missed.
+
 Client → server:
 
 - `room.create { requestId }`
 - `room.join { requestId, roomCode }`
 - `room.leave { requestId }`
 - `session.resume { requestId, roomCode, playerToken }`
-- `game.move { requestId, cell, expectedVersion }`
+- `game.move { requestId, cell, expectedRevision }`
 - `rematch.vote { requestId }`
 - `chat.message`, `chat.typing`, `chat.sticker`, `chat.image`
 - `chat.quick-reaction`, `chat.message-reaction`
 - `presence.ping`
 
+All of the above additionally accept `protocolVersion`.
+
 Server → client:
 
-- `session.ready` with `playerId`, `playerToken`, `displayName`, game snapshot, and active-room RAM chat snapshot
-- `game.snapshot`
-- `chat.message`, `chat.typing`, `chat.message-reaction`, `chat.quick-reaction`
+- `server.hello` with `protocolVersion` and `minClientProtocol`
+- `session.ready` with `playerId`, `playerToken`, `displayName`, game snapshot, `timing`, and active-room RAM chat snapshot
+- `game.snapshot` with `snapshot` and `timing`
+- `chat.message`, `chat.typing`, `chat.message-reaction`, `chat.quick-reaction`, each carrying `sequence`
 - `session.ended`, `command.rejected`, `server.notice`
-- `server.hello`, `presence.pong`
+- `presence.pong`
 
 ## Privacy and lifetime
 
@@ -125,3 +157,12 @@ npm run build:pages
 ```
 
 The automated suite covers game rules and synchronization, automatic identities and collision handling, reconnect identity/chat recovery, text delivery and deduplication, unauthenticated and oversized chat rejection, typing expiry, quick and message reactions, sticker allowlisting, image MIME/signature/size checks, binary-frame rejection, explicit destruction, stale-token rejection, rematches, disconnects, and empty-room expiry.
+
+It also covers the protocol guarantees: version negotiation across the full skew
+matrix, strictly increasing revisions, snapshot equality between two clients at
+the same revision, chat sequence monotonicity, exactly-once execution of every
+replayed command, and a 10,000-frame fuzz run that the server must survive with
+no crash and no accepted garbage.
+
+Style regressions are covered too: board geometry, the 12px type floor, WCAG AA
+contrast recomputed on every run, tap-target sizing, and responsive coverage.

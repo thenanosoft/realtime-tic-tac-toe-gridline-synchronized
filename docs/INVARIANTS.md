@@ -4,6 +4,12 @@ Properties that must hold at every instant, under every network condition. These
 goals — they are the definition of correctness. Every one has, or will have, a test that
 defends it. The chaos suite (`P3-05`) asserts INV-1 … INV-6 continuously during runs.
 
+**Status after Phase 2.** INV-4, INV-5 and INV-11 are defended by tests in
+`tests/protocol.test.ts` and `tests/compatibility.test.ts`. INV-3 is defended for the
+single-connection case — two clients at the same revision are asserted deep-equal — but its
+full form, convergence *after* a network disturbance, needs the Phase 3 chaos harness. The
+rest are open.
+
 ---
 
 ### INV-1 — Turn exclusivity
@@ -23,7 +29,12 @@ newer snapshot.
 After connectivity stabilises, all clients in a room converge to exactly the same
 authoritative state within one round trip.
 
-*Defended by:* `P3-06`.
+This is why `RoomSnapshot` is a pure function of the room at a revision and why everything
+time-dependent was moved into a separate `timing` envelope in Phase 2: a snapshot carrying
+decaying durations can never be compared between two clients, so the invariant would have been
+untestable by construction.
+
+*Defended by:* `P3-06`; partially by the same-revision equality test added in Phase 2.
 *How it breaks:* a dropped snapshot with no resync, or a client that applies events it
 should have discarded.
 

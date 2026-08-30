@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import type { MessageReaction, QuickReaction, RoomSnapshot, StickerId } from '../../shared/protocol';
+import type { MessageReaction, QuickReaction, RoomSnapshot, RoomTiming, StickerId } from '../../shared/protocol';
 import type { StoredSession } from '../lib/session';
 import type { ClientChatMessage, ConnectionState, QuickReactionPopup } from '../hooks/useGameSocket';
 import { PlayerCard } from './PlayerCard';
@@ -13,6 +13,7 @@ import { ChatPanel } from './ChatPanel';
 
 interface GameRoomProps {
   snapshot: RoomSnapshot;
+  timing: RoomTiming | null;
   session: StoredSession;
   connection: ConnectionState;
   pendingMove: boolean;
@@ -34,6 +35,7 @@ interface GameRoomProps {
 
 export function GameRoom({
   snapshot,
+  timing,
   session,
   connection,
   pendingMove,
@@ -160,9 +162,11 @@ export function GameRoom({
           <div className="player-x-area"><PlayerCard mark="X" player={xPlayer} isSelf={xPlayer?.id === session.playerId} snapshot={snapshot} /></div>
           <div className="board-area">
             <div className="board-frame">
-              <div className="board-meta"><span>01 / SERVER-AUTHORITATIVE</span><span>SYNC {String(snapshot.version).padStart(3, '0')}</span></div>
+              <div className="board-meta"><span>01 / SERVER-AUTHORITATIVE</span><span>SYNC {String(snapshot.revision).padStart(3, '0')}</span></div>
               <GameBoard snapshot={snapshot} myMark={self?.mark ?? session.mark} interactive={canMove} onMove={onMove} />
-              {snapshot.phase === 'countdown' && snapshot.countdownEndsAt && <Countdown endsAt={snapshot.countdownEndsAt} />}
+              {snapshot.phase === 'countdown' && timing?.countdownMsRemaining != null && (
+                <Countdown msRemaining={timing.countdownMsRemaining} revision={snapshot.revision} />
+              )}
               {pendingMove && <div className="move-pending"><span /> Confirming move</div>}
               <div className="reaction-popups" aria-live="polite">
                 {quickReactions.map((reaction) => {

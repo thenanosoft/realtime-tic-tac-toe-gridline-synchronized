@@ -61,23 +61,34 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 2 — Protocol v2
 
-- [ ] **P2-01** Add `protocolVersion` to `server.hello` and to every client command; reject
-      mismatches with an actionable message rather than a silent parse failure.
-- [ ] **P2-02** Server-assigned monotonic `revision` on every authoritative game update.
-- [ ] **P2-03** Server-assigned monotonic `sequence` on every chat event (messages, typing,
-      reactions) — none exists today.
-- [ ] **P2-04** Client discards any game or chat event not strictly newer than what it holds.
-- [ ] **P2-05** Remove every client clock from ordering and deadline logic. `countdownEndsAt`
-      and `reconnectDeadline` are currently absolute server epochs compared against `Date.now()`
-      on the client; convert to server-relative durations plus a measured offset.
-- [ ] **P2-06** Unify idempotency into one request ledger covering all commands, with TTL-based
-      eviction replacing the 128-entry `Set` in `RoomManager.remember`.
-- [ ] **P2-07** Idempotency test: every command type replayed twice produces exactly one effect.
-- [ ] **P2-08** Harden Zod schemas; reject unknown fields, oversized frames and non-finite numbers
-      at the edge.
-- [ ] **P2-09** Fuzz suite: 10k randomised malformed frames, server must survive and reject cleanly.
-- [ ] **P2-10** Compatibility matrix test: old client/new server and new client/old server both
-      degrade with a clear message.
+- [x] **P2-01** `PROTOCOL_VERSION = 2`. `server.hello` advertises `protocolVersion` and
+      `minClientProtocol`; every client command carries an optional `protocolVersion` whose
+      absence is read as v1, so a pre-versioning client is still served (D-004). Out-of-range
+      clients get `PROTOCOL_MISMATCH` with an actionable message and the socket stays usable.
+- [x] **P2-02** `RoomSnapshot.version` renamed to `revision` — the old name collided with
+      `protocolVersion` in the same file. Strict monotonicity asserted by test.
+- [x] **P2-03** One monotonic `sequence` per room across all chat events. Messages carry it in
+      `ChatMessageSnapshot`; typing, message reactions and quick reactions carry it on the
+      envelope; `ChatSnapshot.sequence` restores stream position on resume.
+- [x] **P2-04** Client discards stale updates — but only where discarding is correct. Game
+      snapshots and the two state-overwriting chat events are dropped when not newer; chat
+      *messages* are never dropped for lateness, only inserted at their sequence position.
+      Dropping them would lose data, which is not what the ordering guarantee asks for.
+- [x] **P2-05** Every absolute epoch removed from the authoritative snapshot. Deadlines travel
+      as durations in a separate `timing` envelope, and the countdown renders from
+      `performance.now()`. No client clock participates in ordering or in any deadline.
+- [x] **P2-06** Per-player `Map` ledger with a 120s TTL and a 512-entry backstop, replacing the
+      128-entry `Set` and the O(n) `findDuplicateMessage` scan. The ledger records what a replay
+      should return, and is consulted *before* the rate limiter so a legitimate retry is not
+      punished.
+- [x] **P2-07** Replay tested for move, chat message, sticker path, message reaction, quick
+      reaction and rematch vote — each produces exactly one effect.
+- [x] **P2-08** Unknown fields, non-finite numbers and oversized frames all rejected at the edge.
+- [x] **P2-09** 10,000 seeded malformed frames delivered in bursts across fresh sockets; the
+      server survives and still serves the next valid command.
+- [x] **P2-10** Full skew matrix unit-tested by extracting the decision into
+      `app/lib/protocolCompatibility.ts`: agreement, legacy server, malformed version, client
+      behind, client ahead, and unsupported client.
 
 ## Phase 3 — Chaos harness and property tests
 

@@ -149,3 +149,95 @@ scaffold. The structural regression tests that *can* run without a browser are i
 `S1-C` (reduced motion is a blanket `.01ms` kill switch) remains open by design: the roadmap
 puts the designed reduced-motion state in Phase 11 alongside the accessibility pass, and doing
 it properly is design work, not a CSS tweak.
+
+---
+
+## 2026-08-29 — Phase 2 closed: protocol v2
+
+Branch `phase/2-protocol-v2`. Gates: **72 tests pass** (up from 46), typecheck clean, lint
+clean, both builds succeed.
+
+### Versioning (P2-01)
+
+`PROTOCOL_VERSION = 2`. `server.hello` now advertises both `protocolVersion` and
+`minClientProtocol`, and every client command carries an optional `protocolVersion`.
+
+The optionality is the important part. Pages and Render deploy independently, so a version
+skew window always exists — making the field required would have cut every in-flight client
+off the moment the server shipped. Absent is read as v1 and still served, which is what D-004
+asks for. A client claiming a version the server cannot speak gets `PROTOCOL_MISMATCH` with a
+message that says what to do, and the socket stays usable afterwards.
+
+### Ordering (P2-02, P2-03, P2-04)
+
+`RoomSnapshot.version` is now `revision`. The rename was not cosmetic: `version` and
+`protocolVersion` in the same file are genuinely confusing, and this was the release to fix it.
+
+Chat previously had **no ordinal at all**. It now has one monotonic `sequence` per room across
+every chat event.
+
+The subtle part was deciding what "discard stale events" actually means. Applying it uniformly
+would have been wrong: a delayed `chat.message` arriving after a later `chat.typing` would be
+dropped, silently losing a message. So the rule is split by what the event does —
+
+- events that **overwrite** state (typing, reaction sets) are discarded when stale, because
+  applying one resurrects a state the sender already cleared;
+- events that **append** (messages) are never dropped for lateness, only inserted at the
+  position their sequence names.
+
+Same guarantee, no data loss.
+
+### A modelling error the tests caught
+
+The first cut put `serverTime` and the countdown duration inside `RoomSnapshot`. An existing
+test comparing two clients' snapshots immediately failed on a one-millisecond difference — and
+it was right to. Durations decay between emissions, so a snapshot carrying them can never be
+byte-identical across clients, which breaks **INV-3** exactly when Phase 3 will need it most.
+
+Fixed by splitting emission-scoped timing into a separate `timing` envelope on the message.
+`RoomSnapshot` is now a pure function of the room at a revision. `updatedAt` went with it —
+it was mutated by `touch()` without a revision bump, so it had been quietly breaking purity all
+along, and nothing on the client read it.
+
+There is now a test asserting two clients at the same revision hold deep-equal snapshots.
+
+### Clocks (P2-05)
+
+Every absolute epoch is out of the authoritative snapshot. Deadlines travel as durations, and
+the countdown renders from `performance.now()` — monotonic, unaffected by system clock changes
+or NTP steps. No client clock participates in ordering or in any deadline.
+
+### Idempotency (P2-06, P2-07)
+
+The old scheme was a 128-entry `Set` per player plus an O(n) linear scan of chat history for
+duplicate detection. Replaced with one TTL-bounded ledger (120s, 512-entry backstop) that
+records *what a replay should return*, so the reply is rebuilt from current state rather than
+re-executed.
+
+Two behaviour changes fell out of it. The ledger is consulted **before** the rate limiter — a
+client retrying a command it never saw acknowledged should not be throttled for retrying. And
+the ledger is no longer cleared on rematch: request ids are UUIDs and are never reused, so
+clearing only widened the window for a delayed duplicate to execute twice.
+
+### Hardening (P2-08, P2-09, P2-10)
+
+10,000 seeded malformed frames — bad JSON, wrong types, unknown commands, deep nesting,
+`__proto__` as a message type, unbalanced brackets — delivered in bursts across fresh sockets
+so the socket rate limiter does not mask the run. The server survives and still serves the next
+valid command.
+
+The compatibility decision was extracted into `app/lib/protocolCompatibility.ts` so the whole
+skew matrix is unit-testable without a browser: agreement, legacy server, malformed version,
+client behind, client ahead, and unsupported client.
+
+### One test-harness bug fixed on the way
+
+`Probe.connect` attached its message listener after awaiting `open`, which races the
+`server.hello` frame the server sends immediately on connection. It only surfaced once a test
+actually waited for that first frame. The listener is now attached at construction.
+
+### Deployment note
+
+This is a breaking wire change. Per D-004 the **server ships first** — it accepts both v1 and
+v2 clients — and the Pages frontend follows. Deploying in the other order would leave v2
+clients talking to a v1 server, which degrades with a notice but cannot play.

@@ -132,7 +132,7 @@ describe('real WebSocket multiplayer authority', () => {
   }
 
   async function move(actor: TestClient, observer: TestClient, requestId: string, cell: number, count: number) {
-    actor.send({ type: 'game.move', requestId, cell, expectedVersion: actor.latestSnapshot().version });
+    actor.send({ type: 'game.move', requestId, cell, expectedRevision: actor.latestSnapshot().revision });
     const actorState = await actor.waitFor(snapshotWhere((snapshot) => snapshot.board.filter(Boolean).length === count));
     const observerState = await observer.waitFor(snapshotWhere((snapshot) => snapshot.board.filter(Boolean).length === count));
     expect(observerState.snapshot).toEqual(actorState.snapshot);
@@ -145,27 +145,27 @@ describe('real WebSocket multiplayer authority', () => {
     third.send({ type: 'room.join', requestId: 'join-third', roomCode: xSession.roomCode });
     expect((await third.waitFor(isRejection)).code).toBe('ROOM_FULL');
 
-    o.send({ type: 'game.move', requestId: 'wrong-turn', cell: 0, expectedVersion: o.latestSnapshot().version });
+    o.send({ type: 'game.move', requestId: 'wrong-turn', cell: 0, expectedRevision: o.latestSnapshot().revision });
     expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'wrong-turn')).code).toBe('WRONG_TURN');
 
     x.sendRaw('{not json');
     expect((await x.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.code === 'MALFORMED_MESSAGE')).code).toBe('MALFORMED_MESSAGE');
 
-    x.sendRaw(JSON.stringify({ type: 'game.move', requestId: 'bad-cell', cell: 99, expectedVersion: x.latestSnapshot().version }));
+    x.sendRaw(JSON.stringify({ type: 'game.move', requestId: 'bad-cell', cell: 99, expectedRevision: x.latestSnapshot().revision }));
     expect((await x.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'bad-cell')).code).toBe('INVALID_CELL');
   });
 
   it('serializes simultaneous and duplicate move attempts into one canonical update', async () => {
     const { x, o } = await createMatch();
-    const sharedVersion = x.latestSnapshot().version;
-    expect(o.latestSnapshot().version).toBe(sharedVersion);
-    x.send({ type: 'game.move', requestId: 'race-x', cell: 0, expectedVersion: sharedVersion });
-    o.send({ type: 'game.move', requestId: 'race-o', cell: 1, expectedVersion: sharedVersion });
+    const sharedRevision = x.latestSnapshot().revision;
+    expect(o.latestSnapshot().revision).toBe(sharedRevision);
+    x.send({ type: 'game.move', requestId: 'race-x', cell: 0, expectedRevision: sharedRevision });
+    o.send({ type: 'game.move', requestId: 'race-o', cell: 1, expectedRevision: sharedRevision });
     const state = await x.waitFor(snapshotWhere((snapshot) => snapshot.board[0] === 'X'));
     expect(state.snapshot.board.filter(Boolean)).toHaveLength(1);
     expect(['WRONG_TURN', 'STALE_STATE']).toContain((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'race-o')).code);
 
-    x.send({ type: 'game.move', requestId: 'race-x', cell: 0, expectedVersion: sharedVersion });
+    x.send({ type: 'game.move', requestId: 'race-x', cell: 0, expectedRevision: sharedRevision });
     const duplicate = await x.waitFor(snapshotWhere((snapshot) => snapshot.board[0] === 'X' && snapshot.board.filter(Boolean).length === 1));
     expect(duplicate.snapshot.turn).toBe('O');
   });
@@ -181,7 +181,7 @@ describe('real WebSocket multiplayer authority', () => {
     expect(finished.winner).toBe('X');
     expect(finished.winningLine).toEqual([0, 1, 2]);
 
-    o.send({ type: 'game.move', requestId: 'too-late', cell: 8, expectedVersion: o.latestSnapshot().version });
+    o.send({ type: 'game.move', requestId: 'too-late', cell: 8, expectedRevision: o.latestSnapshot().revision });
     expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'too-late')).code).toBe('GAME_COMPLETE');
 
     x.send({ type: 'rematch.vote', requestId: 'rematch-x' });
@@ -240,9 +240,9 @@ describe('real WebSocket multiplayer authority', () => {
     const { x, o, xSession } = await createMatch();
     x.send({ type: 'chat.typing', typing: true });
     const started = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.typing' }> => message.type === 'chat.typing' && message.playerId === xSession.playerId && message.isTyping);
-    expect(started.expiresAt).toBeTypeOf('number');
+    expect(started.msRemaining).toBeTypeOf('number');
     const stopped = await o.waitFor((message): message is Extract<ServerMessage, { type: 'chat.typing' }> => message.type === 'chat.typing' && message.playerId === xSession.playerId && !message.isTyping, 500);
-    expect(stopped.expiresAt).toBeNull();
+    expect(stopped.msRemaining).toBeNull();
   });
 
   it('validates and synchronizes quick reactions, message reactions, and stickers', async () => {
@@ -362,7 +362,7 @@ describe('real WebSocket multiplayer authority', () => {
     expect(restored.snapshot.board[4]).toBe('X');
     expect(restored.snapshot.phase).toBe('active');
     expect(restored.snapshot.turn).toBe('O');
-    const xRestored = await x.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'active' && snapshot.board[4] === 'X' && snapshot.version === restored.snapshot.version));
+    const xRestored = await x.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'active' && snapshot.board[4] === 'X' && snapshot.revision === restored.snapshot.revision));
     expect(xRestored.snapshot).toEqual(restored.snapshot);
   });
 

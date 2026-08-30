@@ -13,6 +13,7 @@ import {
   type QuickReaction,
   type RoomPhase,
   type RoomSnapshot,
+  type RoomTiming,
   type ServerMessage,
   type StickerId,
   type SupportedImageMime,
@@ -22,7 +23,31 @@ import { generateTemporaryName } from './identity';
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 
+/**
+ * How long a completed request stays in the idempotency ledger. Long enough to
+ * cover a reconnect-and-retry cycle, short enough that the ledger cannot grow
+ * without bound. REQUEST_LEDGER_LIMIT is the hard backstop.
+ */
+const REQUEST_LEDGER_TTL_MS = 120_000;
+const REQUEST_LEDGER_LIMIT = 512;
+
 type RateBucket = 'chat' | 'reaction' | 'typing' | 'image';
+
+/**
+ * What a replay of an already-executed request should produce. The command is
+ * never re-executed; the recorded outcome is rebuilt from current room state so
+ * the caller receives the same answer it missed (INV-5).
+ */
+type LedgerOutcome =
+  | { kind: 'game' }
+  | { kind: 'chat'; messageId: string }
+  | { kind: 'reaction'; messageId: string }
+  | { kind: 'silent' };
+
+interface LedgerEntry {
+  at: number;
+  outcome: LedgerOutcome;
+}
 
 export interface Peer {
   id: string;
@@ -38,7 +63,7 @@ interface Player {
   connected: boolean;
   reconnectDeadline: number | null;
   peer: Peer | null;
-  seenRequests: Set<string>;
+  requests: Map<string, LedgerEntry>;
   rateLimits: Record<RateBucket, number[]>;
 }
 
@@ -47,6 +72,7 @@ interface StoredChatBase {
   requestId: string;
   senderId: string;
   createdAt: number;
+  sequence: number;
   reactions: Map<MessageReaction, Set<string>>;
 }
 
@@ -69,7 +95,8 @@ interface Room {
   phase: RoomPhase;
   pausedFrom: 'countdown' | 'active' | null;
   rematchVotes: Set<string>;
-  version: number;
+  revision: number;
+  chatSequence: number;
   round: number;
   countdownEndsAt: number | null;
   createdAt: number;
@@ -99,6 +126,7 @@ export interface SessionResult {
   displayName: string;
   mark: Mark;
   snapshot: RoomSnapshot;
+  timing: RoomTiming;
   chat: ChatSnapshot;
 }
 
@@ -140,7 +168,8 @@ export class RoomManager {
       phase: 'waiting',
       pausedFrom: null,
       rematchVotes: new Set(),
-      version: 1,
+      revision: 1,
+      chatSequence: 0,
       round: 1,
       countdownEndsAt: null,
       createdAt: timestamp,
@@ -207,14 +236,14 @@ export class RoomManager {
     this.destroyRoom(room.code, 'LEFT', 'This private session has ended.');
   }
 
-  move(peerId: string, requestId: string, cell: number, expectedVersion: number): void {
+  move(peerId: string, requestId: string, cell: number, expectedRevision: number): void {
     const { room, player } = this.requireMembership(peerId);
-    if (player.seenRequests.has(requestId)) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), ackRequestId: requestId });
+    if (this.recall(player, requestId)) {
+      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
       return;
     }
-    if (expectedVersion !== room.version) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room) });
+    if (expectedRevision !== room.revision) {
+      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room) });
       throw new CommandError('STALE_STATE', 'The room changed before that move arrived. The latest board has been restored.');
     }
     if (room.phase !== 'active') {
@@ -230,7 +259,7 @@ export class RoomManager {
       if (error instanceof GameRuleError) throw new CommandError(error.code, error.message);
       throw error;
     }
-    this.remember(player, requestId);
+    this.remember(player, requestId, { kind: 'game' });
     if (room.game.winner || room.game.isDraw) room.phase = 'game_over';
     this.bump(room);
     this.broadcastGame(room, requestId);
@@ -238,24 +267,26 @@ export class RoomManager {
 
   voteRematch(peerId: string, requestId: string): void {
     const { room, player } = this.requireMembership(peerId);
-    if (player.seenRequests.has(requestId)) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), ackRequestId: requestId });
+    if (this.recall(player, requestId)) {
+      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
       return;
     }
     if (room.phase !== 'game_over' && room.phase !== 'rematch_waiting') {
       throw new CommandError('GAME_NOT_ACTIVE', 'A rematch can only be requested after the game.');
     }
-    this.remember(player, requestId);
+    this.remember(player, requestId, { kind: 'game' });
     if (room.rematchVotes.has(player.id)) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), ackRequestId: requestId });
+      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
       return;
     }
     room.rematchVotes.add(player.id);
 
     if (room.rematchVotes.size === 2 && this.allPlayersConnected(room)) {
+      // The ledger is deliberately not cleared on rematch. Request ids are
+      // UUIDs and are never reused, so clearing would only widen the window in
+      // which a delayed duplicate could execute a second time.
       for (const candidate of room.players.values()) {
         candidate.mark = candidate.mark === 'X' ? 'O' : 'X';
-        candidate.seenRequests.clear();
       }
       room.game = createInitialGame();
       room.round += 1;
@@ -270,35 +301,29 @@ export class RoomManager {
 
   sendChatMessage(peerId: string, requestId: string, text: string): void {
     const { room, player } = this.requireChatMembership(peerId);
+    // The ledger is consulted before the rate limiter: a client retrying a
+    // command it never saw acknowledged must not be punished for the retry.
+    if (this.replayChat(room, player, requestId)) return;
     this.checkRate(player, 'chat', 12, 8_000);
     const normalized = text.trim();
     if (!normalized) throw new CommandError('INVALID_CHAT', 'Write a message before sending.');
     if (normalized.length > MAX_CHAT_TEXT_LENGTH) {
       throw new CommandError('MESSAGE_TOO_LONG', `Messages can contain up to ${MAX_CHAT_TEXT_LENGTH} characters.`);
     }
-    const duplicate = this.findDuplicateMessage(room, player.id, requestId);
-    if (duplicate) {
-      player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(duplicate), ackRequestId: requestId });
-      return;
-    }
     const message: StoredChatMessage = {
       id: randomUUID(), requestId, senderId: player.id, kind: 'text', text: normalized,
-      createdAt: this.now(), reactions: new Map(),
+      createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
     this.storeAndBroadcastMessage(room, player, message);
   }
 
   sendSticker(peerId: string, requestId: string, stickerId: StickerId): void {
     const { room, player } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, requestId)) return;
     this.checkRate(player, 'chat', 12, 8_000);
-    const duplicate = this.findDuplicateMessage(room, player.id, requestId);
-    if (duplicate) {
-      player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(duplicate), ackRequestId: requestId });
-      return;
-    }
     const message: StoredChatMessage = {
       id: randomUUID(), requestId, senderId: player.id, kind: 'sticker', stickerId,
-      createdAt: this.now(), reactions: new Map(),
+      createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
     this.storeAndBroadcastMessage(room, player, message);
   }
@@ -309,19 +334,15 @@ export class RoomManager {
     image: { mime: SupportedImageMime; width: number; height: number; byteLength: number; data: string },
   ): void {
     const { room, player } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, requestId)) return;
     this.checkRate(player, 'image', 3, 30_000);
-    const duplicate = this.findDuplicateMessage(room, player.id, requestId);
-    if (duplicate) {
-      player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(duplicate), ackRequestId: requestId });
-      return;
-    }
     const bytes = this.validateImage(image.mime, image.width, image.height, image.byteLength, image.data);
     if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
       throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
     }
     const message: StoredChatMessage = {
       id: randomUUID(), requestId, senderId: player.id, kind: 'image', ...image,
-      byteLength: bytes.byteLength, createdAt: this.now(), reactions: new Map(),
+      byteLength: bytes.byteLength, createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
     this.storeAndBroadcastMessage(room, player, message);
   }
@@ -341,46 +362,51 @@ export class RoomManager {
       room.typingTimers.delete(player.id);
       if (!this.rooms.has(room.code) || (room.typing.get(player.id) ?? 0) > this.now()) return;
       room.typing.delete(player.id);
-      this.broadcastChat(room, { type: 'chat.typing', playerId: player.id, isTyping: false, expiresAt: null });
+      this.broadcastChat(room, {
+        type: 'chat.typing', playerId: player.id, isTyping: false,
+        msRemaining: null, sequence: this.nextChatSequence(room),
+      });
     }, this.typingTtlMs + 25);
     timer.unref?.();
     room.typingTimers.set(player.id, timer);
     room.updatedAt = this.now();
-    this.broadcastChat(room, { type: 'chat.typing', playerId: player.id, isTyping: true, expiresAt });
+    this.broadcastChat(room, {
+      type: 'chat.typing', playerId: player.id, isTyping: true,
+      msRemaining: this.typingTtlMs, sequence: this.nextChatSequence(room),
+    });
   }
 
   toggleMessageReaction(peerId: string, requestId: string, messageId: string, reaction: MessageReaction): void {
     const { room, player } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, requestId)) return;
     this.checkRate(player, 'reaction', 20, 5_000);
     const message = room.chatMessages.find((candidate) => candidate.id === messageId);
     if (!message) throw new CommandError('INVALID_REACTION', 'That message is no longer available.');
-    if (player.seenRequests.has(requestId)) {
-      player.peer?.send({
-        type: 'chat.message-reaction', messageId, reactions: this.reactionSnapshot(message), ackRequestId: requestId,
-      });
-      return;
-    }
     const players = message.reactions.get(reaction) ?? new Set<string>();
     if (players.has(player.id)) players.delete(player.id);
     else players.add(player.id);
     if (players.size) message.reactions.set(reaction, players);
     else message.reactions.delete(reaction);
-    this.remember(player, requestId);
+    this.remember(player, requestId, { kind: 'reaction', messageId });
     room.updatedAt = this.now();
     this.broadcastChat(room, {
-      type: 'chat.message-reaction', messageId, reactions: this.reactionSnapshot(message), ackRequestId: requestId,
+      type: 'chat.message-reaction',
+      messageId,
+      reactions: this.reactionSnapshot(message),
+      sequence: this.nextChatSequence(room),
+      ackRequestId: requestId,
     });
   }
 
   sendQuickReaction(peerId: string, requestId: string, reaction: QuickReaction): void {
     const { room, player } = this.requireChatMembership(peerId);
+    if (this.recall(player, requestId)) return;
     this.checkRate(player, 'reaction', 20, 5_000);
-    if (player.seenRequests.has(requestId)) return;
-    this.remember(player, requestId);
+    this.remember(player, requestId, { kind: 'silent' });
     room.updatedAt = this.now();
     this.broadcastChat(room, {
       type: 'chat.quick-reaction', id: randomUUID(), senderId: player.id, reaction,
-      createdAt: this.now(), ackRequestId: requestId,
+      createdAt: this.now(), sequence: this.nextChatSequence(room), ackRequestId: requestId,
     });
   }
 
@@ -420,6 +446,10 @@ export class RoomManager {
     return this.snapshot(this.requireMembership(peerId).room);
   }
 
+  getTimingForPeer(peerId: string): RoomTiming {
+    return this.timing(this.requireMembership(peerId).room);
+  }
+
   getEphemeralStats(code: string): { messages: number; imageBytes: number; typingTimers: number } | null {
     const room = this.rooms.get(code.toUpperCase());
     return room ? { messages: room.chatMessages.length, imageBytes: room.chatImageBytes, typingTimers: room.typingTimers.size } : null;
@@ -451,7 +481,7 @@ export class RoomManager {
         player.peer.send({ type: 'session.ended', reason, message });
       }
       player.token = '';
-      player.seenRequests.clear();
+      player.requests.clear();
       for (const entries of Object.values(player.rateLimits)) entries.length = 0;
       player.peer = null;
       player.connected = false;
@@ -493,7 +523,8 @@ export class RoomManager {
   }
 
   private storeAndBroadcastMessage(room: Room, player: Player, message: StoredChatMessage): void {
-    this.remember(player, message.requestId);
+    message.sequence = this.nextChatSequence(room);
+    this.remember(player, message.requestId, { kind: 'chat', messageId: message.id });
     room.chatMessages.push(message);
     if (message.kind === 'image') room.chatImageBytes += message.byteLength;
     this.pruneChat(room);
@@ -540,12 +571,41 @@ export class RoomManager {
     return bytes;
   }
 
-  private findDuplicateMessage(room: Room, playerId: string, requestId: string): StoredChatMessage | undefined {
-    return room.chatMessages.find((message) => message.senderId === playerId && message.requestId === requestId);
+  /**
+   * Replays an already-executed chat request to the caller, rebuilding the
+   * reply from current room state. Returns false when the request is new.
+   *
+   * A recorded message that has since been pruned from history is answered with
+   * silence rather than a fabricated payload - the request did happen, so it
+   * must not execute a second time.
+   */
+  private replayChat(room: Room, player: Player, requestId: string): boolean {
+    const outcome = this.recall(player, requestId);
+    if (!outcome) return false;
+    if (outcome.kind === 'chat') {
+      const stored = room.chatMessages.find((candidate) => candidate.id === outcome.messageId);
+      if (stored) {
+        player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(stored), ackRequestId: requestId });
+      }
+    } else if (outcome.kind === 'reaction') {
+      const stored = room.chatMessages.find((candidate) => candidate.id === outcome.messageId);
+      if (stored) {
+        player.peer?.send({
+          type: 'chat.message-reaction',
+          messageId: outcome.messageId,
+          reactions: this.reactionSnapshot(stored),
+          sequence: stored.sequence,
+          ackRequestId: requestId,
+        });
+      }
+    }
+    return true;
   }
 
   private broadcastGame(room: Room, ackRequestId?: string): void {
-    const message: ServerMessage = { type: 'game.snapshot', snapshot: this.snapshot(room), ackRequestId };
+    const message: ServerMessage = {
+      type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId,
+    };
     for (const player of room.players.values()) player.peer?.send(message);
   }
 
@@ -553,10 +613,14 @@ export class RoomManager {
     for (const player of room.players.values()) player.peer?.send(message);
   }
 
+  /**
+   * A pure function of the room's authoritative state at its current revision.
+   * Nothing time-dependent belongs here - see RoomTiming and INV-3.
+   */
   private snapshot(room: Room): RoomSnapshot {
     return {
       roomCode: room.code,
-      version: room.version,
+      revision: room.revision,
       phase: room.phase,
       board: [...room.game.board],
       turn: room.game.turn,
@@ -564,7 +628,6 @@ export class RoomManager {
       winningLine: room.game.winningLine ? [...room.game.winningLine] : null,
       isDraw: room.game.isDraw,
       round: room.round,
-      countdownEndsAt: room.countdownEndsAt,
       players: [...room.players.values()]
         .sort((a, b) => a.mark.localeCompare(b.mark))
         .map((player) => ({
@@ -572,10 +635,28 @@ export class RoomManager {
           name: player.name,
           mark: player.mark,
           connected: player.connected,
-          reconnectDeadline: player.reconnectDeadline,
           wantsRematch: room.rematchVotes.has(player.id),
         })),
-      updatedAt: room.updatedAt,
+    };
+  }
+
+  /**
+   * Deadlines leave the server as durations, never as absolute epochs, so a
+   * client with a wrong clock cannot mis-render or mis-enforce them (INV-11).
+   */
+  private timing(room: Room): RoomTiming {
+    const timestamp = this.now();
+    return {
+      serverTime: timestamp,
+      countdownMsRemaining: room.countdownEndsAt === null
+        ? null
+        : Math.max(0, room.countdownEndsAt - timestamp),
+      reconnect: [...room.players.values()]
+        .filter((player) => player.reconnectDeadline !== null)
+        .map((player) => ({
+          playerId: player.id,
+          msRemaining: Math.max(0, (player.reconnectDeadline ?? timestamp) - timestamp),
+        })),
     };
   }
 
@@ -585,7 +666,12 @@ export class RoomManager {
       messages: room.chatMessages.map((message) => this.messageSnapshot(message)),
       typing: [...room.typing.entries()]
         .filter(([, expiresAt]) => expiresAt > timestamp)
-        .map(([playerId, expiresAt]) => ({ playerId, expiresAt })),
+        .map(([playerId, expiresAt]) => ({
+          playerId,
+          msRemaining: expiresAt - timestamp,
+          sequence: room.chatSequence,
+        })),
+      sequence: room.chatSequence,
     };
   }
 
@@ -594,6 +680,7 @@ export class RoomManager {
       id: message.id,
       senderId: message.senderId,
       createdAt: message.createdAt,
+      sequence: message.sequence,
       reactions: this.reactionSnapshot(message),
     };
     if (message.kind === 'text') return { ...base, kind: 'text', text: message.text };
@@ -621,6 +708,7 @@ export class RoomManager {
       displayName: player.name,
       mark: player.mark,
       snapshot: this.snapshot(room),
+      timing: this.timing(room),
       chat: this.chatSnapshot(room),
     };
   }
@@ -634,7 +722,7 @@ export class RoomManager {
       connected: true,
       reconnectDeadline: null,
       peer,
-      seenRequests: new Set(),
+      requests: new Map(),
       rateLimits: { chat: [], reaction: [], typing: [], image: [] },
     };
   }
@@ -669,15 +757,43 @@ export class RoomManager {
   }
 
   private bump(room: Room): void {
-    room.version += 1;
+    room.revision += 1;
     room.updatedAt = this.now();
   }
 
-  private remember(player: Player, requestId: string): void {
-    player.seenRequests.add(requestId);
-    if (player.seenRequests.size > 128) {
-      const oldest = player.seenRequests.values().next().value;
-      if (oldest) player.seenRequests.delete(oldest);
+  private nextChatSequence(room: Room): number {
+    room.chatSequence += 1;
+    return room.chatSequence;
+  }
+
+  /**
+   * Returns the recorded outcome if this request has already been executed.
+   * Expired entries are dropped on the way past, so the ledger self-prunes on
+   * the hot path and does not depend on the sweep timer for correctness.
+   */
+  private recall(player: Player, requestId: string): LedgerOutcome | null {
+    const timestamp = this.now();
+    const entry = player.requests.get(requestId);
+    if (!entry) return null;
+    if (timestamp - entry.at > REQUEST_LEDGER_TTL_MS) {
+      player.requests.delete(requestId);
+      return null;
+    }
+    return entry.outcome;
+  }
+
+  private remember(player: Player, requestId: string, outcome: LedgerOutcome = { kind: 'silent' }): void {
+    const timestamp = this.now();
+    player.requests.set(requestId, { at: timestamp, outcome });
+    if (player.requests.size <= REQUEST_LEDGER_LIMIT) return;
+    for (const [key, entry] of player.requests) {
+      if (timestamp - entry.at > REQUEST_LEDGER_TTL_MS) player.requests.delete(key);
+    }
+    // Map preserves insertion order, so the front of the iterator is the oldest.
+    while (player.requests.size > REQUEST_LEDGER_LIMIT) {
+      const oldest = player.requests.keys().next().value;
+      if (oldest === undefined) break;
+      player.requests.delete(oldest);
     }
   }
 
@@ -695,7 +811,10 @@ export class RoomManager {
     room.typingTimers.delete(playerId);
     const hadTyping = room.typing.delete(playerId);
     if (hadTyping && broadcast) {
-      this.broadcastChat(room, { type: 'chat.typing', playerId, isTyping: false, expiresAt: null });
+      this.broadcastChat(room, {
+        type: 'chat.typing', playerId, isTyping: false,
+        msRemaining: null, sequence: this.nextChatSequence(room),
+      });
     }
   }
 
