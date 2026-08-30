@@ -19,19 +19,18 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 - [x] **P0-05** Point `CLAUDE.md` at `docs/` so future sessions load the plan.
 - [x] **P0-06** Document the branch and release strategy — server ships before client for any
       protocol change. In `docs/README.md`.
-- [ ] **P0-07** Add `npm run test:e2e` and `npm run test:chaos` scripts. Deferred to Phase 3,
-      where the suites they invoke are actually built — a placeholder script that fails would
-      only make CI red for no signal.
+- [x] **P0-07** `npm run test:e2e` (Playwright) and `npm run test:chaos` (chaos + property
+      suites) added in Phase 3, alongside the suites they invoke.
 
 ## Phase 1 — UI/UX foundation
 
 - [x] **P1-01** **Board geometry.** `grid-template-rows: repeat(3, 1fr)` added to `.game-board`
       and `.teaser-board`; cells given `min-height: 0`. Root cause of the "gridline moves until
       all boxes are filled" bug.
-- [~] **P1-02** Structural regression test landed (`tests/styles.test.ts` → *board geometry*):
-      asserts both axes are explicit, no background-painted gridlines remain, and cell borders
-      draw the lines. **The pixel-measured assertion — identical cell bounding boxes at 0, 5 and
-      9 marks — needs a real layout engine and lands with the Playwright scaffold in `P3-09`.**
+- [x] **P1-02** Both halves now land. Structural assertions in `tests/styles.test.ts`, and the
+      pixel-measured proof in `e2e/layout.spec.ts`: every cell square and equal on an empty
+      board, and no cell moving by more than 1px across a full nine-mark draw. A second test
+      measures that adjacent cell edges meet, so the gridlines provably sit on the boundaries.
 - [x] **P1-03** Gridlines moved off the background gradient onto cell-derived borders
       (`.game-cell:not(:nth-child(3n))` / `:nth-child(-n+6)`), so lines and cells cannot drift.
 - [x] **P1-04** Type scale defined as tokens: `--text-micro` (11px, decorative only) through
@@ -46,8 +45,8 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
       so neither wrapping copy nor the rematch button can nudge the board.
 - [x] **P1-09** **Withdrawn — not a defect.** The geometry works out to `0.9214S` on a board of
       side `S`, comfortably inside the box. See UX_AUDIT S2-E for the working. No change made.
-- [~] **P1-10** 375×667 portrait: layout corrected (board floor raised so it can no longer
-      collapse, tap targets and type fixed). **Visual confirmation deferred to `P1-14`/`P3-09`.**
+- [x] **P1-10** 375×667 portrait measured in a real browser: no horizontal overflow, board
+      square and above 240px, and every room control at or above the 44px tap target.
 - [x] **P1-11** 667×375 landscape breakpoint added — three-column arena, board sized from
       viewport height, status compressed to one line. The board could previously compute a
       negative width there.
@@ -56,8 +55,10 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
       into board size. Asserted by test.
 - [x] **P1-13** Contrast audit done by computation, not by eye. Thirteen colours were below
       4.5:1 (worst 2.57:1); all now pass, and the test recomputes every ratio on each run.
-- [ ] **P1-14** Visual snapshot tests for lobby and room at 375, 667×375, 768, 1440. Needs the
-      Playwright scaffold from `P3-09`; carried into Phase 3.
+- [x] **P1-14** Covered at all four viewports by *measured* assertions rather than pixel
+      screenshots — geometry, overflow, computed font sizes, tap targets. Screenshot baselines
+      differ across operating systems and font stacks, so a committed baseline would have been a
+      CI flake generator rather than a safety net. Recorded as a deliberate substitution.
 
 ## Phase 2 — Protocol v2
 
@@ -92,22 +93,34 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 3 — Chaos harness and property tests
 
-- [ ] **P3-01** `?chaos=1` client-side chaos layer, development builds only, stripped from
-      production output and verified absent by a test.
-- [ ] **P3-02** Chaos knobs: 200–1200ms delay, ±400ms jitter, 5% outbound duplication,
-      out-of-order acks, temporary disconnect, rapid reconnect, slow image chunks.
-- [ ] **P3-03** Seeded deterministic RNG and injectable clock so chaos runs reproduce exactly.
-- [ ] **P3-04** Headless chaos suite running full matches at 800ms latency / ±400ms jitter.
-- [ ] **P3-05** Assert INV-1 … INV-6 from `INVARIANTS.md` continuously during chaos runs.
-- [ ] **P3-06** Convergence assertion: after the network stabilises both clients hold identical
-      authoritative state.
-- [ ] **P3-07** Property-based tests over the pure engine — thousands of random move sequences,
-      no invalid state reachable.
-- [ ] **P3-08** Property-based tests over `RoomManager` including reconnects and rematches.
-- [ ] **P3-09** Playwright scaffold: two browser contexts, real WebSocket, full match.
-- [ ] **P3-10** Carried over from Phase 1, because all three need a real layout engine:
-      `P1-02` (cell bounding boxes identical at 0, 5 and 9 marks), `P1-10` (375×667 portrait
-      visual confirmation) and `P1-14` (visual snapshots at 375, 667×375, 768, 1440).
+- [x] **P3-01** `?chaos=1` transport in `app/lib/chaos.ts`, loaded through a dynamic import
+      behind an inlined `NODE_ENV` guard. **Genuinely stripped**, not merely disabled: the first
+      attempt put the guard in a helper function, the minifier could not prove the branch dead,
+      and the chunk shipped. A test greps the built output for a marker string and, in CI, fails
+      rather than skips when `out/` is missing.
+- [x] **P3-02** Per-frame independent delay, jitter, duplication, loss and abrupt disconnect.
+      Reordering emerges from the independent delays rather than being injected separately,
+      which is how a genuinely variable link behaves.
+- [x] **P3-03** mulberry32 seeded RNG in `shared/chaos.ts`, shared by the browser transport and
+      the headless simulation. Vitest fake timers supply the clock, so RoomManager's own
+      countdown and sweep timers run on the same virtual clock as the chaos scheduler.
+- [x] **P3-04** `tests/support/simulation.ts` runs the real RoomManager through the real command
+      dispatcher against clients using the real ordering rules. Only the transport and the move
+      choice are simulated.
+- [x] **P3-05** INV-1, INV-2, INV-4 and INV-6 asserted after every delivered event, not just at
+      the end. **This caught a real bug** — see PROGRESS and INV-1.
+- [x] **P3-06** Convergence asserted across 200 seeded runs at 800ms ±400ms: all 200 finish and
+      all 200 converge to byte-identical state.
+- [x] **P3-07** 5,000 seeded move sequences against the pure engine over eight structural
+      properties, plus 1,000 sequences asserting every illegal move is refused from every
+      reachable state.
+- [x] **P3-08** 500 hostile command sequences against RoomManager (stale revisions, duplicate
+      request ids, out-of-turn moves, votes at the wrong time) and 200 runs asserting two peers
+      never diverge.
+- [x] **P3-09** Playwright scaffold with two browser contexts and the real WebSocket: full match
+      synchronisation, INV-1 under real UI gating, reload recovery, unknown room code, and a
+      genuine transport cut via `routeWebSocket`.
+- [x] **P3-10** `P1-02`, `P1-10` and `P1-14` all closed in `e2e/layout.spec.ts`.
 
 ## Phase 4 — Presence, identity and socket ownership
 

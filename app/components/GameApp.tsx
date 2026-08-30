@@ -40,6 +40,7 @@ export function GameApp() {
           session={game.session}
           connection={game.connection}
           pendingMove={game.pendingMove}
+          resyncing={game.resyncing}
           onMove={game.move}
           onRematch={game.voteRematch}
           playSound={sound.play}

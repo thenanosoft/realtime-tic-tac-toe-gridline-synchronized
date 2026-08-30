@@ -1155,8 +1155,10 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .lobby-layout { min-height: auto; padding: 20px 0 24px; gap: 28px; }
   .hero-copy h1 { font-size: clamp(38px, 7vw, 52px); }
   .lede { margin: 16px 0 20px; }
-  .room-shell { min-height: calc(100svh - 48px); padding: 6px 0 4px; }
-  .room-heading { min-height: 38px; max-width: none; margin-bottom: 4px; }
+  /* min-height must not be forced here: topbar + 100svh room + page padding
+     overflows the viewport by ~43px at 375px tall. The arena sizes itself. */
+  .room-shell { min-height: 0; padding: 4px 0 2px; }
+  .room-heading { min-height: 34px; max-width: none; margin-bottom: 4px; }
   .arena {
     max-width: none;
     margin: 0;
@@ -1166,13 +1168,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     align-items: center;
   }
   .arena-axis { display: none; }
-  .board-area { max-width: none; width: min(calc(100svh - 132px), 46vw); justify-self: center; }
+  /* Sized from the height budget the rest of the arena leaves behind:
+     48 topbar + 34 heading + 48 status + margins + page padding. */
+  .board-area { max-width: none; width: min(calc(100svh - 190px), 44vw); justify-self: center; }
   .board-frame { padding: 7px; border-radius: 16px 7px 16px 7px; }
   .board-meta { display: none; }
   .game-board { border-radius: 13px 5px 13px 5px; }
   .countdown-overlay { inset: 9px; border-radius: 13px 5px 13px 5px; }
   .reaction-popups { inset: 9px; border-radius: 13px 5px 13px 5px; }
-  .game-status { height: 54px; margin-top: 5px; padding: 6px 3px 2px; gap: 9px; }
+  .game-status { height: 48px; margin-top: 4px; padding: 5px 3px 2px; gap: 9px; }
   .status-signal { display: none; }
   .status-copy p { display: none; }
   .player-card { min-height: 0; padding: 10px 10px 10px 12px; }

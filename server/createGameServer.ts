@@ -208,15 +208,28 @@ function handleRawMessage(raw: RawData, isBinary: boolean, state: SocketState, m
     return;
   }
 
+  executeClientMessage(parsed.data, state.peer, manager);
+}
+
+/**
+ * Version-checks, dispatches and error-handles one already-parsed command.
+ *
+ * Exported so the headless chaos simulation drives the same code path as a real
+ * socket rather than a reimplementation of it - a divergence between the two
+ * would make the chaos suite pass while production broke.
+ */
+export function executeClientMessage(message: ClientMessage, peer: Peer, manager: RoomManager): void {
+  const requestId = 'requestId' in message ? message.requestId : undefined;
+
   // A missing protocolVersion means a client built before versioning existed.
   // It is read as LEGACY_CLIENT_PROTOCOL and still served while that version is
   // within the supported range, because Pages and Render deploy independently
   // and a skew window always exists (D-004).
-  const clientProtocol = parsed.data.protocolVersion ?? LEGACY_CLIENT_PROTOCOL;
+  const clientProtocol = message.protocolVersion ?? LEGACY_CLIENT_PROTOCOL;
   if (clientProtocol < MIN_SUPPORTED_CLIENT_PROTOCOL || clientProtocol > PROTOCOL_VERSION) {
     reject(
-      state.peer,
-      'requestId' in parsed.data ? parsed.data.requestId : undefined,
+      peer,
+      requestId,
       'PROTOCOL_MISMATCH',
       clientProtocol > PROTOCOL_VERSION
         ? 'This client speaks a newer protocol than the server. The realtime service is still updating.'
@@ -226,17 +239,17 @@ function handleRawMessage(raw: RawData, isBinary: boolean, state: SocketState, m
   }
 
   try {
-    dispatch(parsed.data, state.peer, manager);
+    dispatch(message, peer, manager);
   } catch (error) {
     if (error instanceof CommandError) {
-      reject(state.peer, 'requestId' in parsed.data ? parsed.data.requestId : undefined, error.code, error.message);
+      reject(peer, requestId, error.code, error.message);
       return;
     }
-    reject(state.peer, 'requestId' in parsed.data ? parsed.data.requestId : undefined, 'INTERNAL_ERROR', 'The server could not process that command.');
+    reject(peer, requestId, 'INTERNAL_ERROR', 'The server could not process that command.');
   }
 }
 
-function dispatch(message: ClientMessage, peer: SocketPeer, manager: RoomManager): void {
+function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): void {
   switch (message.type) {
     case 'room.create': {
       const session = manager.createRoom(peer);

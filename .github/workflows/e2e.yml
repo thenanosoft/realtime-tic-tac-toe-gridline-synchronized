@@ -1,0 +1,67 @@
+name: End-to-end and chaos
+
+# Deliberately a separate workflow from the Pages deploy.
+#
+# The deploy path stays fast and is gated by the unit, type and lint checks it
+# already runs. Browser end-to-end runs take around five minutes on a free
+# runner and depend on a downloaded Chromium, so putting them in front of every
+# deployment would make shipping slow and hostage to browser flake. They run in
+# parallel here instead, and a failure is a signal to fix rather than a gate
+# that silently blocks a release.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  chaos:
+    name: Chaos and property suites
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run the chaos and property suites
+        run: npm run test:chaos
+
+  e2e:
+    name: Two-browser end-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+      - name: Run end-to-end tests
+        run: npm run test:e2e
+      - name: Upload the report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

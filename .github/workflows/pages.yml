@@ -50,6 +50,10 @@ jobs:
           fi
       - name: Build static frontend
         run: npm run build:pages
+      - name: Verify the chaos transport is absent from the production bundle
+        # Runs after the build on purpose: the assertion reads out/, which does
+        # not exist during the earlier test step.
+        run: npx vitest run --config vitest.config.ts tests/chaos.test.ts -t "development-only"
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:

@@ -4,19 +4,33 @@ Properties that must hold at every instant, under every network condition. These
 goals — they are the definition of correctness. Every one has, or will have, a test that
 defends it. The chaos suite (`P3-05`) asserts INV-1 … INV-6 continuously during runs.
 
-**Status after Phase 2.** INV-4, INV-5 and INV-11 are defended by tests in
-`tests/protocol.test.ts` and `tests/compatibility.test.ts`. INV-3 is defended for the
-single-connection case — two clients at the same revision are asserted deep-equal — but its
-full form, convergence *after* a network disturbance, needs the Phase 3 chaos harness. The
-rest are open.
+**Status after Phase 3.** INV-1, INV-2, INV-3, INV-4, INV-5, INV-6 and INV-11 are all
+defended by running tests. The chaos suite asserts INV-1, INV-2, INV-4 and INV-6 after every
+delivered event across 200 seeded runs at 800ms ±400ms latency, and INV-3 at the end of each.
+INV-7 through INV-10 belong to phases that have not started.
 
 ---
 
 ### INV-1 — Turn exclusivity
-At no point may both clients believe it is their turn.
+At no point may two clients simultaneously be **able to act**.
 
-*Defended by:* `P5-05`, chaos suite.
-*How it breaks:* an optimistic turn flip applied locally while a rejection is in flight.
+**Refined in Phase 3.** The original wording — "believe it is their turn" — is not enforceable
+as written. Mid-propagation, one client may still hold revision 5 (its turn) while the other
+already has revision 6 (its turn), and both *read* as "your turn" for one network delay. What
+must never happen is that both can *act*, because that is what produces a rejected move and a
+board that snaps back. Interactivity is the property the UI gates on and the property the
+chaos suite measures.
+
+**A real violation was found and fixed here.** The client marked the connection `connected` the
+instant a socket opened, before `session.resume` was answered. The board it still held from
+before the drop was stale, but presented as playable — so a reconnecting player and their
+opponent both had live boards. Fixed with a `resyncing` flag that keeps the board inert until
+the server confirms the resumed session.
+
+*Defended by:* the chaos suite (200 seeded runs), `e2e/multiplayer.spec.ts`, and `P5-05` when
+optimistic rendering arrives.
+*How it breaks:* any path that presents a held snapshot as current before the server has
+confirmed it — a reconnect, a resume, or a future optimistic turn flip.
 
 ### INV-2 — No phantom moves
 At no point may a client display a move that the authoritative server has rejected.
@@ -34,7 +48,8 @@ time-dependent was moved into a separate `timing` envelope in Phase 2: a snapsho
 decaying durations can never be compared between two clients, so the invariant would have been
 untestable by construction.
 
-*Defended by:* `P3-06`; partially by the same-revision equality test added in Phase 2.
+*Defended by:* 200 seeded chaos runs, each ending with a byte-identical comparison of both
+clients against the server; plus the same-revision equality test from Phase 2.
 *How it breaks:* a dropped snapshot with no resync, or a client that applies events it
 should have discarded.
 

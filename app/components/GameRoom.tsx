@@ -17,6 +17,7 @@ interface GameRoomProps {
   session: StoredSession;
   connection: ConnectionState;
   pendingMove: boolean;
+  resyncing: boolean;
   onMove(cell: number): void;
   onRematch(): void;
   playSound: ReturnType<typeof useGameSound>['play'];
@@ -39,6 +40,7 @@ export function GameRoom({
   session,
   connection,
   pendingMove,
+  resyncing,
   onMove,
   onRematch,
   playSound,
@@ -62,7 +64,14 @@ export function GameRoom({
   const xPlayer = snapshot.players.find((player) => player.mark === 'X');
   const oPlayer = snapshot.players.find((player) => player.mark === 'O');
   const self = snapshot.players.find((player) => player.id === session.playerId);
-  const canMove = connection === 'connected' && snapshot.phase === 'active' && snapshot.turn === self?.mark && !pendingMove;
+  // `connection === 'connected'` alone is not sufficient: it flips the instant
+  // the socket opens, while the board still holds whatever was true before the
+  // drop. Until the server confirms the resumed session, this snapshot is stale.
+  const canMove = connection === 'connected'
+    && !resyncing
+    && snapshot.phase === 'active'
+    && snapshot.turn === self?.mark
+    && !pendingMove;
   const sceneState = snapshot.winner
     ? `winner-${snapshot.winner.toLowerCase()}`
     : snapshot.isDraw

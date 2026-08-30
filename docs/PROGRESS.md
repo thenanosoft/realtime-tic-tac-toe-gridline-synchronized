@@ -241,3 +241,105 @@ actually waited for that first frame. The listener is now attached at constructi
 This is a breaking wire change. Per D-004 the **server ships first** — it accepts both v1 and
 v2 clients — and the Pages frontend follows. Deploying in the other order would leave v2
 clients talking to a v1 server, which degrades with a notice but cannot play.
+
+---
+
+## 2026-08-29 — Phase 3 closed: chaos harness and property tests
+
+Branch `phase/3-chaos-and-properties`. Gates: **85 unit tests** (up from 72) plus **16
+Playwright end-to-end tests**, typecheck clean, lint clean, both builds succeed.
+
+### The phase found a real bug, which is the point of the phase
+
+The chaos suite failed on its first run — and only on seeds where a disconnect occurred. Ten
+of fifty such runs reported the same violation: *"X and O could both move"*.
+
+It was not a simulation artifact. `useGameSocket` set `connection = 'connected'` the instant
+the socket opened, **before** `session.resume` was answered. `GameRoom.canMove` gated on that
+flag, so during the resume round-trip a reconnecting player was shown the board they had held
+before the drop — stale, but fully interactive — while their opponent, who never disconnected,
+also had a live board. Both could click. One of them was going to be told the room had changed.
+
+Fixed with a `resyncing` flag: the board stays inert from socket open until the server confirms
+the session. `INV-1` has been reworded to match what is actually enforceable — see below.
+
+### INV-1 was too loose to be testable
+
+The original wording was "at no point may both players believe it is their turn". That cannot
+hold: mid-propagation one client holds revision 5 and the other revision 6, and both *read* as
+"your turn" for one network delay. Nothing is wrong at that moment — the client on the older
+revision has a move in flight and cannot act.
+
+What must never happen is that both can **act**. That is the property the UI gates on, the one
+that produces a visible snap-back when violated, and the one the suite now measures.
+
+### What was built
+
+- **`shared/chaos.ts`** — seeded mulberry32 RNG and a pure chaos policy: per-frame delay,
+  jitter, duplication, loss. Delays are drawn independently per frame, so reordering emerges
+  the way a variable link produces it rather than being injected as a separate step.
+- **`app/lib/ordering.ts`** — the client's ordering rules extracted as pure functions, so the
+  simulation drives the *same* logic the browser runs. A hand-written approximation would have
+  made a green chaos run evidence about a parallel universe.
+- **`app/lib/chaos.ts`** — the `?chaos=1` browser transport, development-only.
+- **`tests/support/simulation.ts`** — the real `RoomManager` behind the real command dispatcher
+  (`executeClientMessage`, exported from `createGameServer` for exactly this reason), driven by
+  vitest fake timers so 800ms of latency costs microseconds and replays exactly from a seed.
+
+### Stripping the chaos transport took two attempts
+
+The first version guarded the dynamic import with a `chaosRequested()` helper. `NODE_ENV`
+inlines to `'production'`, so the helper constant-folds to `return false` — but the minifier
+cannot prove that *the call* is always false, and the chunk shipped anyway. Verified by
+grepping the built output, which is why the check exists.
+
+Moving the condition inline at the call site makes it `if (false && …)`, and the whole branch
+including the dynamic import disappears. The test greps `out/` for a marker string and, in CI,
+**fails rather than skips** when `out/` is absent — otherwise the one assertion that proves the
+stripping would quietly become a no-op.
+
+### Numbers
+
+| Suite | Coverage |
+| --- | --- |
+| Chaos matches | 200 seeded runs at 800ms ±400ms, 5% duplication, disconnects on every fourth seed. All 200 finish; all 200 converge byte-identically. |
+| Engine properties | 5,000 seeded move sequences over eight structural properties; 1,000 more asserting every illegal move is refused from every reachable state. |
+| RoomManager properties | 500 hostile command sequences (stale revisions, duplicate request ids, out-of-turn moves, mistimed votes); 200 runs asserting two peers never diverge. |
+| End-to-end | 16 tests, two browser contexts, real WebSocket. |
+
+### Phase 1's deferred work is now closed
+
+`P1-02`, `P1-10` and `P1-14` all needed a real layout engine. In `e2e/layout.spec.ts`:
+
+- Every cell is square and equal on an empty board, and **no cell moves by more than 1px**
+  across a full nine-mark draw — the direct proof that the reported bug is gone.
+- Adjacent cell edges meet within 1.5px, so the gridlines provably sit on the boundaries.
+- 375×667, 667×375, 768×1024 and 1440×900 all measured for overflow, board geometry and tap
+  targets.
+- Nothing renders below 11px; prose and identity text at 12px or above; the composer at 16px.
+- The board stays dominant with **30 real chat messages** in the panel, and does not move by
+  more than 1px as they arrive.
+
+**A substitution worth recording:** `P1-14` asked for visual snapshots. Screenshot baselines
+differ across operating systems and font stacks, so a committed baseline would have been a CI
+flake generator rather than a safety net. Measured assertions catch the defects this phase is
+about — drifting cells, collapsed boards, unreadable text — without that cost.
+
+### Two things the landscape work turned up
+
+The 667×375 layout added in Phase 1 was **still overflowing vertically by 43px** — the browser
+found what the stylesheet reading could not. `min-height: calc(100svh - 48px)` on the room plus
+the topbar plus page padding exceeds the viewport by construction. Now the arena sizes itself
+and the board is derived from the remaining height budget.
+
+Separately, driving 30 chat messages hit the server's rate limit at 24. The limit is a flat
+12-per-8-seconds sliding window that cannot tell an enthusiastic player from a spammer — which
+is exactly what `P7-09` exists to fix. Recorded there as evidence rather than worked around.
+
+### CI
+
+`e2e.yml` runs the chaos, property and Playwright suites on push and pull request, deliberately
+**separate** from the Pages deploy workflow. A five-minute browser run on a free runner in
+front of every deployment would make shipping slow and hostage to browser flake. `pages.yml`
+keeps its fast unit, type and lint gates, and gains one post-build step: the chaos-transport
+bundle check, which has to run after `build:pages` because it reads `out/`.

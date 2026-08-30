@@ -18,6 +18,7 @@ import {
 } from '../../shared/protocol';
 import { prepareChatImage, ImagePreparationError } from '../lib/images';
 import { evaluateServerHello } from '../lib/protocolCompatibility';
+import { insertMessage, shouldApplyOverwrite, shouldApplySnapshot } from '../lib/ordering';
 import { clearSession, loadSession, saveSession, type StoredSession } from '../lib/session';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
@@ -57,6 +58,14 @@ export function useGameSocket() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [lobbyBusy, setLobbyBusy] = useState(false);
   const [pendingMove, setPendingMove] = useState(false);
+  /**
+   * True from the moment a socket reopens with a session to resume until the
+   * server confirms it. The snapshot held across a reconnect is stale by
+   * definition, and presenting it as playable lets both players see an
+   * interactive board at once - a violation of INV-1 that the chaos suite
+   * surfaced. Marking "connected" on socket open alone is not enough.
+   */
+  const [resyncing, setResyncing] = useState(false);
   const [chatMessages, setChatMessages] = useState<ClientChatMessage[]>([]);
   const [typingPlayerId, setTypingPlayerId] = useState<string | null>(null);
   const [quickReactions, setQuickReactions] = useState<QuickReactionPopup[]>([]);
@@ -73,6 +82,7 @@ export function useGameSocket() {
   const typingSequenceRef = useRef(new Map<string, number>());
   const reactionSequenceRef = useRef(new Map<string, number>());
   const protocolBlockedRef = useRef(false);
+  const chaosFactoryRef = useRef<((url: string) => WebSocket) | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -147,7 +157,7 @@ export function useGameSocket() {
       if (current.some((candidate) => candidate.id === message.id)) return current;
       const nextMessage = toClientMessage(message);
       if (!nextMessage) return current;
-      const next = [...current, nextMessage].sort((a, b) => a.sequence - b.sequence);
+      const next = insertMessage(current, nextMessage);
       let imageBytes = next.reduce((total, candidate) => (
         total + (candidate.kind === 'image' ? candidate.byteLength : 0)
       ), 0);
@@ -168,8 +178,7 @@ export function useGameSocket() {
     // Typing overwrites state rather than appending to it, so a late event must
     // be discarded outright: applying it would resurrect an indicator the sender
     // has already cleared (INV-4).
-    const lastSequence = typingSequenceRef.current.get(playerId) ?? 0;
-    if (sequence <= lastSequence) return;
+    if (!shouldApplyOverwrite(typingSequenceRef.current.get(playerId) ?? 0, sequence)) return;
     typingSequenceRef.current.set(playerId, sequence);
     chatSequenceRef.current = Math.max(chatSequenceRef.current, sequence);
 
@@ -192,8 +201,7 @@ export function useGameSocket() {
     // Never apply an update that is not strictly newer than what we hold. A
     // reconnect can deliver a resume snapshot and a live broadcast out of order,
     // and without this an older board would overwrite a newer one (INV-4).
-    const current = revisionRef.current;
-    if (current && current.roomCode === incoming.roomCode && incoming.revision <= current.revision) return;
+    if (!shouldApplySnapshot(revisionRef.current, incoming)) return;
     revisionRef.current = { roomCode: incoming.roomCode, revision: incoming.revision };
     setSnapshot(incoming);
     setTiming(incomingTiming);
@@ -214,6 +222,7 @@ export function useGameSocket() {
     setSession(null);
     setSnapshot(null);
     setTiming(null);
+    setResyncing(false);
     clearPrivateState();
     setNotice({ tone, text: message });
   }, [clearPrivateState]);
@@ -232,6 +241,7 @@ export function useGameSocket() {
         setSession(nextSession);
         saveSession(nextSession);
         setLobbyBusy(false);
+        setResyncing(false);
         acceptSnapshot(message.snapshot, message.timing);
         replaceChat(message.chat);
         setTypingPlayerId(null);
@@ -256,8 +266,7 @@ export function useGameSocket() {
       case 'chat.message-reaction': {
         // Reaction sets overwrite per message, so staleness is tracked per
         // message rather than against the room-wide stream.
-        const lastSequence = reactionSequenceRef.current.get(message.messageId) ?? 0;
-        if (message.sequence <= lastSequence) return;
+        if (!shouldApplyOverwrite(reactionSequenceRef.current.get(message.messageId) ?? 0, message.sequence)) return;
         reactionSequenceRef.current.set(message.messageId, message.sequence);
         chatSequenceRef.current = Math.max(chatSequenceRef.current, message.sequence);
         setChatMessages((current) => current.map((chatMessage) => (
@@ -285,6 +294,7 @@ export function useGameSocket() {
         }
         setLobbyBusy(false);
         setNotice({ tone: 'error', text: message.message });
+        setResyncing(false);
         if ((message.code === 'INVALID_SESSION' || message.code === 'ROOM_NOT_FOUND') && sessionRef.current) {
           endLocalSession(message.message, 'error');
         }
@@ -336,7 +346,9 @@ export function useGameSocket() {
         setNotice({ tone: 'info', text: 'The production realtime endpoint has not been configured yet.' });
         return;
       }
-      const socket = new WebSocket(webSocketUrl);
+      const socket = chaosFactoryRef.current
+        ? chaosFactoryRef.current(webSocketUrl)
+        : new WebSocket(webSocketUrl);
       socketRef.current = socket;
 
       socket.addEventListener('open', () => {
@@ -344,6 +356,7 @@ export function useGameSocket() {
         setConnection('connected');
         setNotice((current) => current?.tone === 'error' ? current : null);
         if (sessionRef.current) {
+          setResyncing(true);
           socket.send(JSON.stringify({
             type: 'session.resume',
             requestId: requestId(),
@@ -396,7 +409,28 @@ export function useGameSocket() {
     };
 
     connectRef.current = connect;
-    connect();
+
+    // The NODE_ENV comparison is inlined at build time, so in a production build
+    // this whole branch becomes `if (false && ...)` and the minifier removes it
+    // along with the dynamic import - which is how the chaos transport is kept
+    // out of the shipped bundle rather than merely disabled inside it. Keeping
+    // the condition at the call site matters: behind a helper function the
+    // minifier cannot prove the branch is dead, and the chunk survives.
+    if (
+      process.env.NODE_ENV !== 'production'
+      && typeof window !== 'undefined'
+      && new URLSearchParams(window.location.search).get('chaos') === '1'
+    ) {
+      void import('../lib/chaos')
+        .then(({ createChaosSocket, readChaosOptions }) => {
+          const options = readChaosOptions(window.location.search);
+          if (options) chaosFactoryRef.current = (url) => createChaosSocket(url, options);
+        })
+        .catch(() => undefined)
+        .finally(() => connect());
+    } else {
+      connect();
+    }
     return () => {
       stoppedRef.current = true;
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
@@ -513,6 +547,7 @@ export function useGameSocket() {
     session,
     snapshot,
     timing,
+    resyncing,
     notice,
     lobbyBusy,
     pendingMove,
