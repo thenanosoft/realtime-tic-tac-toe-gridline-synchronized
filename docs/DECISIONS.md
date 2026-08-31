@@ -156,3 +156,44 @@ Designing E2EE before the capability model exists would mean designing it twice.
 
 **Consequence.** `README.md`'s current statement that E2EE is not implemented stays accurate
 until Phase 8, and must be updated the moment it lands.
+
+---
+
+## D-008 — The two deploys cannot be sequenced, so the client must degrade honestly · **DECIDED** · 2026-08-31
+
+**Problem, observed rather than theorised.** D-004 says the server ships before the client for
+any protocol change. Phase 2 was exactly such a change. But a single push to `main` triggers the
+GitHub Pages workflow *and* Render's auto-deploy at the same moment, and nothing sequences them.
+Immediately after pushing `c02aa53`, a probe of `wss://gridline-realtime.onrender.com/ws`
+returned a `server.hello` with **no `protocolVersion` at all** — the v1 server — while the Pages
+build was already running.
+
+So D-004's ordering is an intention the deployment topology cannot actually enforce.
+
+**Decision.** Do not try to sequence the two deploys. Rely on the client degrading honestly
+instead, which is what `P2-01` and `app/lib/protocolCompatibility.ts` were built for.
+
+**Why not sequence them.** The alternatives are all worse for a project of this size:
+
+- Gating the Pages workflow on a Render health probe couples two providers and turns any Render
+  hiccup into a frontend outage.
+- Deploying the server from a separate branch adds a release ritual that will be forgotten
+  exactly once, on the change where it matters.
+- Manually pausing auto-deploy means remembering to unpause.
+
+**What the window actually costs.** During it, a v2 client reaching a v1 server sends
+`expectedRevision` where the old schema expects `expectedVersion`, so moves are rejected as
+`MALFORMED_MESSAGE`. The client detects the mismatch from the missing `protocolVersion` in
+`server.hello` and shows *"The realtime service is running an older version…"* rather than
+failing silently. The room is unplayable for the length of the window; it is not corrupted, and
+it recovers on its own once Render finishes.
+
+**Consequence.** The honest-degradation path is now load-bearing infrastructure, not a nicety.
+Two obligations follow:
+
+1. Never remove or weaken the `legacy-server` branch of `evaluateServerHello`, and keep its test
+   in `tests/compatibility.test.ts`.
+2. When a protocol change ships, verify the backend has caught up before announcing it. The
+   probe used here reads `server.hello.protocolVersion` directly, which is the only reliable
+   signal — `/health` does not report a version. Adding one is worth doing (tracked as a note
+   against Phase 12's audit work).

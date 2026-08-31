@@ -146,10 +146,15 @@ describe('chaos transport is development-only (P3-01)', () => {
     try {
       files = collect(root);
     } catch {
-      // Locally the static export may simply not have been built yet. In CI it
-      // always has been by the time this runs, and silently skipping there
-      // would turn the one assertion that proves the stripping into a no-op.
-      if (process.env.CI) throw new Error('out/ is missing; build:pages must run before this check in CI');
+      // Skipping is correct whenever the static export has not been built - which
+      // includes CI, because `npm test` runs before `build:pages` in the deploy
+      // workflow. Gating this on CI alone failed the deploy for exactly that
+      // reason. REQUIRE_BUILT_BUNDLE is set only by the post-build step, so the
+      // assertion is strict where out/ genuinely exists and silent where it
+      // cannot, without ever becoming an unnoticed no-op.
+      if (process.env.REQUIRE_BUILT_BUNDLE) {
+        throw new Error('out/ is missing, but REQUIRE_BUILT_BUNDLE was set: build:pages must run first');
+      }
       return;
     }
 

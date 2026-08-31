@@ -343,3 +343,63 @@ is exactly what `P7-09` exists to fix. Recorded there as evidence rather than wo
 front of every deployment would make shipping slow and hostage to browser flake. `pages.yml`
 keeps its fast unit, type and lint gates, and gains one post-build step: the chaos-transport
 bundle check, which has to run after `build:pages` because it reads `out/`.
+
+---
+
+## 2026-08-31 — Phases 0–3 merged to `main` and deployed
+
+`main` fast-forwarded from `b02f5ee` to `c02aa53` and pushed. Six commits, 34 files,
++3,837/−376.
+
+### The backend deployed cleanly and is verified in production
+
+Render picked up the push and **protocol v2 was live 21 seconds later**, confirmed by probing
+`server.hello` directly — `/health` reports no version, so it cannot answer this question.
+
+A real two-player match was then played against the deployed backend
+(`npm run verify:production`, now a committed script). Fifteen checks, all passing: protocol
+advertisement, `revision` replacing `version`, the timing envelope sitting outside the snapshot,
+no absolute deadlines in authoritative state, chat sequences, distinct generated identities,
+a completed win, both clients converged, a replayed move changing nothing, and a
+`PROTOCOL_MISMATCH` rejection that leaves the socket usable.
+
+### The frontend deploy failed, and it was my mistake
+
+The Pages workflow failed at `npm test`. The cause was a change I made minutes before pushing:
+the bundle-stripping check had been set to **throw rather than skip whenever `CI` was set**, so
+that it could not silently become a no-op. But `npm test` runs *before* `build:pages` in that
+workflow, so `out/` legitimately does not exist yet — and the check failed the deploy.
+
+Reproduced locally with `CI=true` and no `out/`, which showed the failure exactly.
+
+Fixed by gating strictness on a dedicated `REQUIRE_BUILT_BUNDLE`, set only by the post-build
+step. All three modes are now verified:
+
+| Condition | Behaviour |
+| --- | --- |
+| `CI`, no `out/` (the pre-build test step) | skips |
+| `REQUIRE_BUILT_BUNDLE`, no `out/` | fails loudly |
+| `REQUIRE_BUILT_BUNDLE`, real `out/` | passes |
+
+The original instinct was right — a check that quietly skips is worthless — but the trigger was
+wrong. `CI` means "running in automation", not "the build has happened".
+
+### The verification script had a race of its own
+
+Its first production run passed and the second failed. Not the product: the helper scanned the
+whole message history, so *"is it my turn?"* matched a snapshot from before the client's own
+last move, and the winner was read from a client still a revision behind.
+
+Fixed with a `waitUntil` that only ever examines current state, plus waiting on **both** clients
+after each move rather than just the observer. Three consecutive clean runs since.
+
+Also removed a `.ts` import from that script: it relied on Node's type stripping, on by default
+only from 22.18, while `package.json` allows 22.13. The constant is now read from the shared
+source directly, keeping one source of truth without quietly raising the version floor.
+
+### On the deployment window
+
+D-008 records what was actually observed: the two deploys cannot be sequenced, the v1 server was
+still answering while the Pages build ran, and the honest-degradation path from `P2-01` is what
+covers the gap. In this instance the ordering worked out in our favour anyway — the backend was
+live in 21 seconds and the frontend deploy failed, so no v2 client ever met a v1 server.

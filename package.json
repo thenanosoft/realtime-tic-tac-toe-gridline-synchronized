@@ -16,7 +16,8 @@
     "test": "vitest run --config vitest.config.ts",
     "test:watch": "vitest --config vitest.config.ts",
     "test:e2e": "playwright test",
-    "test:chaos": "vitest run --config vitest.config.ts tests/chaos.test.ts tests/property.test.ts"
+    "test:chaos": "vitest run --config vitest.config.ts tests/chaos.test.ts tests/property.test.ts",
+    "verify:production": "node scripts/verify-production.mjs"
   },
   "dependencies": {
     "concurrently": "^10.0.5",
