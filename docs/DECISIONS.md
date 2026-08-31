@@ -56,7 +56,7 @@ CI were produced with npm 10 and changing it is not a Phase 0 concern.
 
 ---
 
-## D-002 — Multi-tab ownership policy · **OPEN** · raised 2026-08-29
+## D-002 — Multi-tab ownership policy · **DECIDED** · raised 2026-08-29, decided 2026-08-31
 
 **Problem.** When the same session token is opened in a second tab, three policies are
 defensible: (A) newest connection takes control, (B) original connection keeps control,
@@ -83,7 +83,28 @@ is **kept connected in an explicit read-only state** rather than disconnected. R
 attachment distinct from a player slot, and the capability model (`P6-01`) has to distinguish
 "holds the player slot" from "is connected as this player".
 
-**Decider.** User, at the start of Phase 4.
+**Decision (2026-08-31).** The recommendation is accepted: **newest connection takes control,
+displaced connection becomes explicitly read-only** rather than being disconnected.
+
+**What this obliges Phase 4 to build.**
+
+1. A player slot and a *connection* become separate things. Several connections may be attached
+   to one player; exactly one of them holds the slot.
+2. `resumeSession` stops closing the previous socket with code 4001. It demotes it instead, and
+   tells it why.
+3. The demoted view says so in words — not a disabled board with no explanation — and offers
+   **Take control here**, which is the same claim operation in the other direction.
+4. The presence state machine (`P4-01`) gains a read-only attachment distinct from the slot, and
+   the capability model (`P6-01`) has to distinguish *holds the player slot* from *is connected
+   as this player*.
+5. INV-6 tightens rather than loosens: several connections per player are now legal, but exactly
+   one may be able to act. The chaos suite already measures that, and `P4-09` extends it to
+   reconnect storms with two attached connections.
+
+**Note on the reversal button.** "Take control here" makes the policy symmetric, so two tabs can
+in principle fight over the slot. That is acceptable because each claim is a server-authoritative
+command with a revision — the loser of the race is told it lost, exactly as a rejected move is.
+It must not be implemented as a client-side toggle.
 
 ---
 

@@ -126,11 +126,15 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 - [ ] **P4-01** Server-authoritative presence state machine: `online → reconnecting → offline →
       expired`, with legal transitions enumerated and tested.
-- [ ] **P4-02** Decide and document the multi-tab ownership policy (D-002).
-- [ ] **P4-03** Implement it. Today `resumeSession` closes the older socket with code 4001; the
-      chosen policy must be explicit and never create a duplicate player.
+- [x] **P4-02** Policy decided and documented (D-002, 2026-08-31): **newest connection takes
+      control, displaced connection becomes explicitly read-only** rather than disconnected.
+- [ ] **P4-03** Implement it. Today `resumeSession` closes the older socket with code 4001. Per
+      D-002 it must instead demote that connection to read-only, keep it attached, and never
+      create a duplicate player. Requires separating *player slot* from *connection*.
 - [ ] **P4-04** Communicate ownership in the UI — the non-controlling tab states plainly that it
-      is read-only and why.
+      is read-only and why, and offers **Take control here**. That reversal is a
+      server-authoritative command, never a client-side toggle: two tabs may race for the slot
+      and the loser must be told it lost.
 - [ ] **P4-05** Cross-device session reclaim: laptop → phone with identical identity and mark.
 - [ ] **P4-06** Separate host capability from player slot so the creator is not structurally
       special.
