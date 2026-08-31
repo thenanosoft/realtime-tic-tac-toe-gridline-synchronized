@@ -40,8 +40,25 @@ From Phase 3 onward, two more gates apply:
 
 ```bash
 npm run test:e2e      # Playwright, two browser contexts
-npm run test:chaos    # adverse-network convergence suite
+npm run test:chaos    # chaos convergence + property suites
 ```
+
+And one check that runs against what is actually deployed, rather than against the code:
+
+```bash
+npm run verify:production      # plays a real match on the live backend
+WS_URL=wss://… npm run verify:production
+```
+
+It exists because the Pages and Render deploys cannot be sequenced ([D-008](./DECISIONS.md)),
+so after a protocol change the only reliable signal that the backend has caught up is asking
+it — `/health` reports no version.
+
+**One CI subtlety worth knowing.** The check that proves the chaos transport is absent from the
+production bundle reads `out/`, which does not exist when `npm test` runs in the deploy
+workflow. It skips unless `REQUIRE_BUILT_BUNDLE=1` is set, which only the post-build step does.
+Gating it on `CI` instead once failed a deploy: `CI` means "running in automation", not "the
+build has happened".
 
 ## Local environment
 
@@ -68,10 +85,12 @@ $env:PATH = "D:\Android\nodejs;C:\Program Files\Git\cmd;$env:PATH"
 - **One branch per phase**, named `phase/<n>-<slug>` — e.g. `phase/1-ui-foundation`. Merged to
   `main` only when every exit criterion for that phase is green.
 - **Commits reference task IDs.** `P1-01: give the board explicit grid rows`.
-- **Protocol changes ship server-first.** Because Pages and Render deploy independently, a
-  breaking wire change must land on Render — accepting both old and new clients — before the
-  matching frontend goes out. This is D-004, and `P2-01` (protocol versioning) exists to make
-  the mismatch window fail loudly instead of silently.
+- **Protocol changes cannot be sequenced, so the client degrades honestly instead.** D-004 asked
+  for server-first, but one push triggers both deploys simultaneously and nothing orders them —
+  confirmed in practice, see D-008. `P2-01` (protocol versioning) is therefore not a nicety but
+  the mechanism that covers the window: a client meeting an older server says so plainly instead
+  of failing silently. After shipping a protocol change, run `npm run verify:production` to
+  confirm the backend has caught up.
 - **Never push a phase branch that leaves a gate red.** The five verification gates are the
   merge condition, not a suggestion.
 
@@ -83,6 +102,6 @@ $env:PATH = "D:\Android\nodejs;C:\Program Files\Git\cmd;$env:PATH"
   `/health` health check, `/ws` WebSocket upgrade, auto-deploy from `main`.
 - **Wiring** — GitHub Actions variable `NEXT_PUBLIC_WS_URL` = `wss://gridline-realtime.onrender.com/ws`.
 
-Both sides are deployed and verified working. Any phase that changes the wire protocol
-must ship the server first, because Pages and Render deploy independently — see
-`P2-01` (protocol versioning) which exists specifically to make that safe.
+Both sides are deployed and verified working — see `PROGRESS.md` for the Phase 3 deployment
+record, including the fifteen production checks that `npm run verify:production` performs
+against the live backend.
