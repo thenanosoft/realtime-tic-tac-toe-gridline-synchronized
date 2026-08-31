@@ -17,7 +17,8 @@
     "test:watch": "vitest --config vitest.config.ts",
     "test:e2e": "playwright test",
     "test:chaos": "vitest run --config vitest.config.ts tests/chaos.test.ts tests/property.test.ts",
-    "verify:production": "node scripts/verify-production.mjs"
+    "verify:production": "node scripts/verify-production.mjs",
+    "og": "npx --yes sharp-cli --input assets/og.png --output public --format jpeg --quality 86 resize 1200 630 --fit cover --position centre"
   },
   "dependencies": {
     "concurrently": "^10.0.5",
