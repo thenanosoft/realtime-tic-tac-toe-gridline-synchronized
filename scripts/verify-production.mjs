@@ -47,11 +47,18 @@ class Client {
 
   send(message) { this.socket.send(JSON.stringify({ ...message, protocolVersion: PROTOCOL_VERSION })); }
 
-  waitFor(predicate, timeout = 15_000) {
+  waitFor(predicate, timeout = 15_000, label = 'a message') {
     const existing = this.messages.find(predicate);
     if (existing) return Promise.resolve(existing);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.listeners.delete(check); reject(new Error(this.name + ' timed out')); }, timeout);
+      const timer = setTimeout(() => {
+        this.listeners.delete(check);
+        // Named, because diagnosis is this script's entire job. A bare stack
+        // trace says it broke; it does not say where the round trip stalled,
+        // which is the only useful thing when the link is intercontinental and
+        // the failure does not reproduce.
+        reject(new Error(this.name + ' timed out waiting for ' + label + ' after ' + timeout + 'ms'));
+      }, timeout);
       const check = () => {
         const found = this.messages.find(predicate);
         if (!found) return;
@@ -166,7 +173,7 @@ check('future protocol rejected with PROTOCOL_MISMATCH', rejection.code === 'PRO
 // Leaving frees a slot rather than ending the room. The survivor keeps a live
 // room on the same code, and the host capability moves to them.
 x.send({ type: 'room.leave', requestId: 'smoke-leave' });
-await x.waitFor((m) => m.type === 'session.ended');
+await x.waitFor((m) => m.type === 'session.ended', 15_000, 'the leave to be acknowledged');
 await o.waitUntil((s) => s.players.length === 1, 'the room to survive the departure');
 check('the room outlived the player who opened it', o.snapshot().players.length === 1);
 check('host migrated to the survivor', o.snapshot().players[0].isHost === true);
@@ -174,3 +181,9 @@ check('the board reset for a new opponent', o.snapshot().phase === 'waiting' && 
 
 x.close(); o.close();
 console.log(process.exitCode ? '\nPRODUCTION SMOKE TEST FAILED' : '\nPRODUCTION SMOKE TEST PASSED');
+
+process.on('unhandledRejection', (error) => {
+  console.log('  FAIL  ' + (error instanceof Error ? error.message : String(error)));
+  console.log('\nPRODUCTION SMOKE TEST FAILED');
+  process.exit(1);
+});
