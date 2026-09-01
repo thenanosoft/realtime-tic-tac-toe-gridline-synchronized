@@ -11,6 +11,7 @@ import {
   type ChatSnapshot,
   type MessageReaction,
   type QuickReaction,
+  type PresenceState,
   type RoomPhase,
   type RoomSnapshot,
   type RoomTiming,
@@ -32,6 +33,8 @@ const REQUEST_LEDGER_TTL_MS = 120_000;
 const REQUEST_LEDGER_LIMIT = 512;
 
 type RateBucket = 'chat' | 'reaction' | 'typing' | 'image';
+
+type ControlReason = 'GRANTED' | 'DISPLACED' | 'RESUMED' | 'RECLAIMED';
 
 /**
  * What a replay of an already-executed request should produce. The command is
@@ -60,9 +63,25 @@ interface Player {
   token: string;
   name: string;
   mark: Mark;
-  connected: boolean;
+  /**
+   * Every window and device currently attached to this player slot.
+   *
+   * A slot and a connection are separate things (D-002). Several may be
+   * attached; exactly one - `controllingPeerId` - may act. The rest are
+   * read-only views that can claim control back.
+   */
+  connections: Map<string, Peer>;
+  controllingPeerId: string | null;
   reconnectDeadline: number | null;
-  peer: Peer | null;
+  /**
+   * The presence last sent to clients.
+   *
+   * Presence is *derived* from connections and the clock, so the transition from
+   * reconnecting to offline happens with no event to carry it. Without this the
+   * opponent would sit on "Reconnecting..." indefinitely: correct on the server,
+   * wrong on every screen. The sweep compares against this and announces drift.
+   */
+  announcedPresence: PresenceState;
   requests: Map<string, LedgerEntry>;
   rateLimits: Record<RateBucket, number[]>;
 }
@@ -95,6 +114,13 @@ interface Room {
   phase: RoomPhase;
   pausedFrom: 'countdown' | 'active' | null;
   rematchVotes: Set<string>;
+  /**
+   * Host is a capability attached to a player, not to the creator's identity.
+   * It migrates when the holder leaves, so a room never dies with its opener
+   * (P4-06/P4-07). The capability carries no powers yet - those arrive with the
+   * token model in Phase 6 - but the migration has to exist first.
+   */
+  hostPlayerId: string;
   revision: number;
   chatSequence: number;
   round: number;
@@ -125,6 +151,7 @@ export interface SessionResult {
   playerId: string;
   displayName: string;
   mark: Mark;
+  hasControl: boolean;
   snapshot: RoomSnapshot;
   timing: RoomTiming;
   chat: ChatSnapshot;
@@ -168,6 +195,7 @@ export class RoomManager {
       phase: 'waiting',
       pausedFrom: null,
       rematchVotes: new Set(),
+      hostPlayerId: player.id,
       revision: 1,
       chatSequence: 0,
       round: 1,
@@ -182,7 +210,7 @@ export class RoomManager {
     };
     this.rooms.set(code, room);
     this.connectionIndex.set(peer.id, { roomCode: code, playerId: player.id });
-    return this.sessionResult(room, player);
+    return this.sessionResult(room, player, peer.id);
   }
 
   joinRoom(code: string, peer: Peer): SessionResult {
@@ -193,12 +221,18 @@ export class RoomManager {
     if (room.players.size >= 2) {
       throw new CommandError('ROOM_FULL', 'This room already has two players.');
     }
+    // Whichever mark is free, not always 'O'. Once a player can leave a room
+    // that survives them (P4-07), the remaining player may well be the O - and
+    // handing the newcomer another O leaves a board nobody can play: the turn
+    // sits on X and no player holds it.
+    const taken = new Set([...room.players.values()].map((player) => player.mark));
+    const mark: Mark = taken.has('X') ? 'O' : 'X';
     const names = new Set([...room.players.values()].map((player) => player.name));
-    const player = this.createPlayer('O', peer, names);
+    const player = this.createPlayer(mark, peer, names);
     room.players.set(player.id, player);
     this.connectionIndex.set(peer.id, { roomCode: room.code, playerId: player.id });
     this.beginCountdown(room);
-    return this.sessionResult(room, player);
+    return this.sessionResult(room, player, peer.id);
   }
 
   resumeSession(code: string, token: string, peer: Peer): SessionResult {
@@ -209,14 +243,13 @@ export class RoomManager {
     const player = [...room.players.values()].find((candidate) => candidate.token === token);
     if (!player) throw new CommandError('INVALID_SESSION', 'This player session is no longer valid.');
 
-    if (player.peer && player.peer.id !== peer.id) {
-      this.connectionIndex.delete(player.peer.id);
-      player.peer.close(4001, 'Session resumed in another window');
-    }
-    player.peer = peer;
-    player.connected = true;
+    // The previously controlling window is NOT closed. It stays attached as an
+    // explicit read-only view and can claim the slot back (D-002). Closing it,
+    // as this used to, left the old tab looking broken with no way home.
+    player.connections.set(peer.id, peer);
     player.reconnectDeadline = null;
     this.connectionIndex.set(peer.id, { roomCode: room.code, playerId: player.id });
+    this.grantControl(player, peer.id, 'RESUMED');
 
     if (room.phase === 'paused' && this.allPlayersConnected(room)) {
       if (room.pausedFrom === 'countdown') this.beginCountdown(room);
@@ -228,22 +261,78 @@ export class RoomManager {
     } else {
       this.bump(room);
     }
-    return this.sessionResult(room, player);
+    return this.sessionResult(room, player, peer.id);
   }
 
+  /**
+   * Removes one player from the room. The room itself survives.
+   *
+   * This used to destroy the room for everyone, which meant a room died with
+   * whoever opened it. Now the slot is freed, host migrates if the leaver held
+   * it, and the remaining player is returned to a waiting room ready for a new
+   * opponent (P4-07). The room is destroyed only once nobody is left.
+   *
+   * Chat is cleared on departure. The conversation was private to the two people
+   * in it, and whoever joins the freed slot next must not be able to read it.
+   */
   leaveRoom(peerId: string): void {
-    const { room } = this.requireMembership(peerId);
-    this.destroyRoom(room.code, 'LEFT', 'This private session has ended.');
+    const { room, player } = this.requireControl(peerId);
+
+    for (const peer of player.connections.values()) {
+      this.connectionIndex.delete(peer.id);
+      peer.send({ type: 'session.ended', reason: 'LEFT', message: 'You left this private session.' });
+    }
+    player.connections.clear();
+    player.controllingPeerId = null;
+    player.token = '';
+    player.requests.clear();
+    this.clearTyping(room, player.id, false);
+    room.rematchVotes.delete(player.id);
+    room.players.delete(player.id);
+
+    if (room.players.size === 0) {
+      this.destroyRoom(room.code, 'LEFT', 'This private session has ended.');
+      return;
+    }
+
+    if (room.hostPlayerId === player.id) {
+      const successor = [...room.players.keys()][0];
+      room.hostPlayerId = successor;
+    }
+
+    // The board belonged to a match that no longer has two players in it.
+    this.clearStartTimer(room);
+    this.purgeChat(room);
+    room.game = createInitialGame();
+    room.phase = 'waiting';
+    room.pausedFrom = null;
+    room.countdownEndsAt = null;
+    room.rematchVotes.clear();
+    this.bump(room);
+    this.broadcastGame(room);
+  }
+
+  /**
+   * Moves the player slot to the calling window.
+   *
+   * Server-authoritative on purpose: two windows may race for the slot, and the
+   * loser has to be told it lost rather than quietly believing it won.
+   */
+  claimControl(peerId: string, requestId: string): void {
+    const { room, player } = this.requireMembership(peerId);
+    this.grantControl(player, peerId, 'GRANTED', requestId);
+    this.bump(room);
+    this.broadcastGame(room);
   }
 
   move(peerId: string, requestId: string, cell: number, expectedRevision: number): void {
-    const { room, player } = this.requireMembership(peerId);
+    const { room, player, peer } = this.requireControl(peerId);
     if (this.recall(player, requestId)) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
       return;
     }
     if (expectedRevision !== room.revision) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room) });
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room) });
       throw new CommandError('STALE_STATE', 'The room changed before that move arrived. The latest board has been restored.');
     }
     if (room.phase !== 'active') {
@@ -266,9 +355,9 @@ export class RoomManager {
   }
 
   voteRematch(peerId: string, requestId: string): void {
-    const { room, player } = this.requireMembership(peerId);
+    const { room, player, peer } = this.requireControl(peerId);
     if (this.recall(player, requestId)) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
       return;
     }
     if (room.phase !== 'game_over' && room.phase !== 'rematch_waiting') {
@@ -276,7 +365,7 @@ export class RoomManager {
     }
     this.remember(player, requestId, { kind: 'game' });
     if (room.rematchVotes.has(player.id)) {
-      player.peer?.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
       return;
     }
     room.rematchVotes.add(player.id);
@@ -300,10 +389,10 @@ export class RoomManager {
   }
 
   sendChatMessage(peerId: string, requestId: string, text: string): void {
-    const { room, player } = this.requireChatMembership(peerId);
+    const { room, player, peer } = this.requireChatMembership(peerId);
     // The ledger is consulted before the rate limiter: a client retrying a
     // command it never saw acknowledged must not be punished for the retry.
-    if (this.replayChat(room, player, requestId)) return;
+    if (this.replayChat(room, player, peer, requestId)) return;
     this.checkRate(player, 'chat', 12, 8_000);
     const normalized = text.trim();
     if (!normalized) throw new CommandError('INVALID_CHAT', 'Write a message before sending.');
@@ -318,8 +407,8 @@ export class RoomManager {
   }
 
   sendSticker(peerId: string, requestId: string, stickerId: StickerId): void {
-    const { room, player } = this.requireChatMembership(peerId);
-    if (this.replayChat(room, player, requestId)) return;
+    const { room, player, peer } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, peer, requestId)) return;
     this.checkRate(player, 'chat', 12, 8_000);
     const message: StoredChatMessage = {
       id: randomUUID(), requestId, senderId: player.id, kind: 'sticker', stickerId,
@@ -333,8 +422,8 @@ export class RoomManager {
     requestId: string,
     image: { mime: SupportedImageMime; width: number; height: number; byteLength: number; data: string },
   ): void {
-    const { room, player } = this.requireChatMembership(peerId);
-    if (this.replayChat(room, player, requestId)) return;
+    const { room, player, peer } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, peer, requestId)) return;
     this.checkRate(player, 'image', 3, 30_000);
     const bytes = this.validateImage(image.mime, image.width, image.height, image.byteLength, image.data);
     if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
@@ -377,8 +466,8 @@ export class RoomManager {
   }
 
   toggleMessageReaction(peerId: string, requestId: string, messageId: string, reaction: MessageReaction): void {
-    const { room, player } = this.requireChatMembership(peerId);
-    if (this.replayChat(room, player, requestId)) return;
+    const { room, player, peer } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, peer, requestId)) return;
     this.checkRate(player, 'reaction', 20, 5_000);
     const message = room.chatMessages.find((candidate) => candidate.id === messageId);
     if (!message) throw new CommandError('INVALID_REACTION', 'That message is no longer available.');
@@ -416,10 +505,21 @@ export class RoomManager {
     this.connectionIndex.delete(peerId);
     const room = this.rooms.get(indexed.roomCode);
     const player = room?.players.get(indexed.playerId);
-    if (!room || !player || player.peer?.id !== peerId) return;
+    if (!room || !player || !player.connections.has(peerId)) return;
 
-    player.peer = null;
-    player.connected = false;
+    const wasControlling = player.controllingPeerId === peerId;
+    player.connections.delete(peerId);
+
+    // Losing one window is not losing the player. Another attached window takes
+    // the slot, and the match carries on without a pause.
+    if (player.connections.size > 0) {
+      if (wasControlling) this.promoteAnotherConnection(player);
+      this.bump(room);
+      this.broadcastGame(room);
+      return;
+    }
+
+    player.controllingPeerId = null;
     player.reconnectDeadline = this.now() + this.reconnectGraceMs;
     this.clearTyping(room, player.id, true);
     if (room.phase === 'countdown' || room.phase === 'active') {
@@ -476,15 +576,15 @@ export class RoomManager {
     room.typing.clear();
 
     for (const player of room.players.values()) {
-      if (player.peer) {
-        this.connectionIndex.delete(player.peer.id);
-        player.peer.send({ type: 'session.ended', reason, message });
+      for (const peer of player.connections.values()) {
+        this.connectionIndex.delete(peer.id);
+        peer.send({ type: 'session.ended', reason, message });
       }
       player.token = '';
       player.requests.clear();
       for (const entries of Object.values(player.rateLimits)) entries.length = 0;
-      player.peer = null;
-      player.connected = false;
+      player.connections.clear();
+      player.controllingPeerId = null;
     }
 
     for (const chatMessage of room.chatMessages) {
@@ -530,6 +630,24 @@ export class RoomManager {
     this.pruneChat(room);
     room.updatedAt = this.now();
     this.broadcastChat(room, { type: 'chat.message', message: this.messageSnapshot(message), ackRequestId: message.requestId });
+  }
+
+  /**
+   * Wipes the conversation without destroying the room. Used when a player
+   * leaves: the chat was private to the two people in it, so whoever takes the
+   * freed slot next must not be able to read it.
+   */
+  private purgeChat(room: Room): void {
+    for (const message of room.chatMessages) {
+      message.reactions.clear();
+      if (message.kind === 'image') message.data = '';
+    }
+    room.chatMessages.length = 0;
+    room.chatImageBytes = 0;
+    room.chatSequence += 1;
+    for (const timer of room.typingTimers.values()) clearTimeout(timer);
+    room.typingTimers.clear();
+    room.typing.clear();
   }
 
   private pruneChat(room: Room): void {
@@ -579,18 +697,18 @@ export class RoomManager {
    * silence rather than a fabricated payload - the request did happen, so it
    * must not execute a second time.
    */
-  private replayChat(room: Room, player: Player, requestId: string): boolean {
+  private replayChat(room: Room, player: Player, peer: Peer, requestId: string): boolean {
     const outcome = this.recall(player, requestId);
     if (!outcome) return false;
     if (outcome.kind === 'chat') {
       const stored = room.chatMessages.find((candidate) => candidate.id === outcome.messageId);
       if (stored) {
-        player.peer?.send({ type: 'chat.message', message: this.messageSnapshot(stored), ackRequestId: requestId });
+        peer.send({ type: 'chat.message', message: this.messageSnapshot(stored), ackRequestId: requestId });
       }
     } else if (outcome.kind === 'reaction') {
       const stored = room.chatMessages.find((candidate) => candidate.id === outcome.messageId);
       if (stored) {
-        player.peer?.send({
+        peer.send({
           type: 'chat.message-reaction',
           messageId: outcome.messageId,
           reactions: this.reactionSnapshot(stored),
@@ -606,11 +724,13 @@ export class RoomManager {
     const message: ServerMessage = {
       type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId,
     };
-    for (const player of room.players.values()) player.peer?.send(message);
+    // Every attached window, not only the controlling one: a read-only view
+    // showing a stale board would be worse than no view at all.
+    for (const player of room.players.values()) this.sendToPlayer(player, message);
   }
 
   private broadcastChat(room: Room, message: ServerMessage): void {
-    for (const player of room.players.values()) player.peer?.send(message);
+    for (const player of room.players.values()) this.sendToPlayer(player, message);
   }
 
   /**
@@ -634,7 +754,9 @@ export class RoomManager {
           id: player.id,
           name: player.name,
           mark: player.mark,
-          connected: player.connected,
+          presence: this.recordPresence(player),
+          connectionCount: player.connections.size,
+          isHost: room.hostPlayerId === player.id,
           wantsRematch: room.rematchVotes.has(player.id),
         })),
     };
@@ -700,13 +822,14 @@ export class RoomManager {
     return [...message.reactions.entries()].map(([reaction, playerIds]) => ({ reaction, playerIds: [...playerIds] }));
   }
 
-  private sessionResult(room: Room, player: Player): SessionResult {
+  private sessionResult(room: Room, player: Player, peerId: string): SessionResult {
     return {
       roomCode: room.code,
       playerToken: player.token,
       playerId: player.id,
       displayName: player.name,
       mark: player.mark,
+      hasControl: player.controllingPeerId === peerId,
       snapshot: this.snapshot(room),
       timing: this.timing(room),
       chat: this.chatSnapshot(room),
@@ -719,9 +842,10 @@ export class RoomManager {
       token: `${randomUUID().replaceAll('-', '')}${randomUUID().replaceAll('-', '')}`,
       name: generateTemporaryName(excludedNames),
       mark,
-      connected: true,
+      connections: new Map([[peer.id, peer]]),
+      controllingPeerId: peer.id,
       reconnectDeadline: null,
-      peer,
+      announcedPresence: 'online',
       requests: new Map(),
       rateLimits: { chat: [], reaction: [], typing: [], image: [] },
     };
@@ -733,19 +857,37 @@ export class RoomManager {
     return room;
   }
 
-  private requireMembership(peerId: string): { room: Room; player: Player } {
+  /** Attachment only. Does not imply the caller may act - see requireControl. */
+  private requireMembership(peerId: string): { room: Room; player: Player; peer: Peer } {
     const indexed = this.connectionIndex.get(peerId);
     if (!indexed) throw new CommandError('NOT_IN_ROOM', 'Join a room before sending game commands.');
     const room = this.rooms.get(indexed.roomCode);
     const player = room?.players.get(indexed.playerId);
-    if (!room || !player || player.peer?.id !== peerId) {
+    const peer = player?.connections.get(peerId);
+    if (!room || !player || !peer) {
       throw new CommandError('INVALID_SESSION', 'This player session is no longer active.');
     }
-    return { room, player };
+    return { room, player, peer };
   }
 
-  private requireChatMembership(peerId: string): { room: Room; player: Player } {
+  /**
+   * Every mutating command goes through here. A read-only window is attached and
+   * fully informed, but may not act - which is the whole point of the policy:
+   * the demoted tab stays useful instead of being disconnected.
+   */
+  private requireControl(peerId: string): { room: Room; player: Player; peer: Peer } {
     const membership = this.requireMembership(peerId);
+    if (membership.player.controllingPeerId !== peerId) {
+      throw new CommandError(
+        'NOT_IN_CONTROL',
+        'Another window has control of this session. Take control here to play.',
+      );
+    }
+    return membership;
+  }
+
+  private requireChatMembership(peerId: string): { room: Room; player: Player; peer: Peer } {
+    const membership = this.requireControl(peerId);
     if (membership.room.players.size !== 2) {
       throw new CommandError('GAME_NOT_ACTIVE', 'Private chat opens when your opponent joins.');
     }
@@ -753,7 +895,77 @@ export class RoomManager {
   }
 
   private allPlayersConnected(room: Room): boolean {
-    return room.players.size === 2 && [...room.players.values()].every((player) => player.connected);
+    return room.players.size === 2 && [...room.players.values()].every((player) => player.connections.size > 0);
+  }
+
+  // --- Presence and connection ownership ---------------------------------
+
+  /**
+   * Presence is derived, never stored, so it cannot drift out of step with the
+   * connections that define it. The client renders this and never computes it.
+   */
+  private presenceOf(player: Player, timestamp: number): PresenceState {
+    if (player.connections.size > 0) return 'online';
+    if (player.reconnectDeadline === null) return 'offline';
+    if (timestamp < player.reconnectDeadline) return 'reconnecting';
+    if (timestamp < player.reconnectDeadline + this.reservationTtlMs) return 'offline';
+    return 'expired';
+  }
+
+  /**
+   * Derives presence and remembers what was sent, so the sweep can tell when the
+   * clock alone has moved a player on and a broadcast is owed.
+   */
+  private recordPresence(player: Player): PresenceState {
+    const presence = this.presenceOf(player, this.now());
+    player.announcedPresence = presence;
+    return presence;
+  }
+
+  /** Sends to every window attached to a player, not just the controlling one. */
+  private sendToPlayer(player: Player, message: ServerMessage): void {
+    for (const peer of player.connections.values()) peer.send(message);
+  }
+
+  private controlMessage(player: Player, hasControl: boolean, reason: ControlReason, ackRequestId?: string): ServerMessage {
+    return {
+      type: 'session.control',
+      hasControl,
+      reason,
+      connectionCount: player.connections.size,
+      ackRequestId,
+    };
+  }
+
+  /**
+   * Moves the player slot to one attached connection and tells the displaced one
+   * why - rather than closing its socket, which is what made the old tab look
+   * broken (D-002).
+   */
+  private grantControl(player: Player, peerId: string, reason: ControlReason, ackRequestId?: string): void {
+    const previousId = player.controllingPeerId;
+    if (previousId === peerId) {
+      player.connections.get(peerId)?.send(this.controlMessage(player, true, reason, ackRequestId));
+      return;
+    }
+    player.controllingPeerId = peerId;
+    const displaced = previousId ? player.connections.get(previousId) : null;
+    displaced?.send(this.controlMessage(player, false, 'DISPLACED'));
+    player.connections.get(peerId)?.send(this.controlMessage(player, true, reason, ackRequestId));
+  }
+
+  /**
+   * Hands control to the most recently attached surviving window when the
+   * controller goes away. Map preserves insertion order, so the last entry is
+   * the newest attachment - the same "newest wins" rule as an explicit claim.
+   */
+  private promoteAnotherConnection(player: Player): void {
+    let candidate: string | null = null;
+    for (const peerId of player.connections.keys()) candidate = peerId;
+    player.controllingPeerId = candidate;
+    if (candidate) {
+      player.connections.get(candidate)?.send(this.controlMessage(player, true, 'RECLAIMED'));
+    }
   }
 
   private bump(room: Room): void {
@@ -837,9 +1049,25 @@ export class RoomManager {
     const timestamp = this.now();
     for (const room of [...this.rooms.values()]) {
       const players = [...room.players.values()];
-      const allOffline = players.every((player) => !player.connected);
+
+      // Announce derived presence drift. Nothing else will: the move from
+      // reconnecting to offline is the passage of time, not an event.
+      let presenceChanged = false;
+      for (const player of players) {
+        const current = this.presenceOf(player, timestamp);
+        if (current !== player.announcedPresence) {
+          player.announcedPresence = current;
+          presenceChanged = true;
+        }
+      }
+      if (presenceChanged && this.rooms.has(room.code)) {
+        this.bump(room);
+        this.broadcastGame(room);
+      }
+
+      const allOffline = players.every((player) => player.connections.size === 0);
       const offlineTooLong = players.some(
-        (player) => !player.connected && player.reconnectDeadline !== null && timestamp - player.reconnectDeadline > this.reservationTtlMs,
+        (player) => this.presenceOf(player, timestamp) === 'expired',
       );
       const ttl = players.length === 1 ? this.waitingRoomTtlMs : this.emptyRoomTtlMs;
       if ((allOffline && timestamp - room.updatedAt >= ttl) || offlineTooLong) {

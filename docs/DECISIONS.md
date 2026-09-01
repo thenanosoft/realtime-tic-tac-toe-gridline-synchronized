@@ -218,3 +218,27 @@ Two obligations follow:
    probe used here reads `server.hello.protocolVersion` directly, which is the only reliable
    signal — `/health` does not report a version. Adding one is worth doing (tracked as a note
    against Phase 12's audit work).
+
+---
+
+## D-009 — Raise the minimum supported client protocol to 2 · **DECIDED** · 2026-08-31
+
+**Decision.** `MIN_SUPPORTED_CLIENT_PROTOCOL` moves from 1 to 2 in protocol v3.
+
+**Rationale.** Keeping it at 1 had become a lie. A v1 client sends `expectedVersion`, which the
+schema stopped accepting in v2, so it could create a room, join, chat — and then fail its first
+move with `MALFORMED_MESSAGE`. Advertising support for a version we cannot actually serve is
+worse than refusing it: the player gets a confusing failure deep into a session instead of an
+actionable message at the door.
+
+A v2 client is still fully served. Every v2 command remains valid in v3, so the one-release skew
+window D-004 asks for is genuinely honoured.
+
+**Consequence, and the bug it exposed.** Raising the floor immediately broke every reconnect,
+and the end-to-end suite caught it. `session.resume` was written directly to the socket from the
+open handler rather than through the `send` helper, so it was the one command that never got a
+`protocolVersion` stamped. The server read it as protocol 1 and refused it.
+
+That is now structurally impossible: a single `encode()` is the only place an outbound frame is
+serialised, and both paths go through it. The lesson is worth keeping — the bug was not the
+version bump, it was having two places that stamped independently.

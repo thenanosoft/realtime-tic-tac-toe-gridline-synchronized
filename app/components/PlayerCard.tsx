@@ -1,5 +1,5 @@
 import type { Mark } from '../../shared/game';
-import type { PlayerSnapshot, RoomSnapshot } from '../../shared/protocol';
+import type { PlayerSnapshot, PresenceState, RoomSnapshot } from '../../shared/protocol';
 
 interface PlayerCardProps {
   mark: Mark;
@@ -12,11 +12,22 @@ export function PlayerCard({ mark, player, isSelf, snapshot }: PlayerCardProps) 
   const active = snapshot.phase === 'active' && snapshot.turn === mark;
   const won = snapshot.winner === mark;
   const lost = Boolean(snapshot.winner && snapshot.winner !== mark);
+  // Presence is rendered, never derived. The server owns the state machine, so
+  // a client that guessed from a boolean would disagree with it under latency.
+  const presenceLabel: Record<PresenceState, string> = {
+    online: 'Signal live',
+    reconnecting: 'Reconnecting…',
+    offline: 'Signal lost',
+    expired: 'Session expired',
+  };
+  const online = player?.presence === 'online';
   const stateLabel = !player
     ? 'Waiting to join'
-    : !player.connected
+    : player.presence === 'reconnecting'
       ? 'Reconnecting'
-      : won
+      : player.presence !== 'online'
+        ? 'Away'
+        : won
         ? 'Winner'
         : lost
           ? 'Good game'
@@ -37,9 +48,14 @@ export function PlayerCard({ mark, player, isSelf, snapshot }: PlayerCardProps) 
         {mark === 'X' ? <span className="emblem-drawn-x"><i /><i /></span> : <span className="emblem-drawn-o" />}
       </div>
       <h2>{player?.name ?? 'Waiting…'}</h2>
-      <div className={`presence ${player?.connected ? 'online' : 'offline'}`}>
+      <div className={`presence presence-${player?.presence ?? 'waiting'} ${online ? 'online' : 'offline'}`}>
         <span aria-hidden="true" />
-        {player?.connected ? 'Signal live' : player ? 'Signal interrupted' : 'Open invitation'}
+        {player ? presenceLabel[player.presence] : 'Open invitation'}
+        {player && player.connectionCount > 1 && (
+          <b className="window-count" title="This player has more than one window open">
+            {player.connectionCount} windows
+          </b>
+        )}
       </div>
       <div className="player-state"><i aria-hidden="true" />{stateLabel}</div>
     </article>

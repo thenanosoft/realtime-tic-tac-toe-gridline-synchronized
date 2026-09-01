@@ -23,6 +23,7 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'session.resume',
   'game.move',
   'rematch.vote',
+  'session.claim',
   'chat.message',
   'chat.typing',
   'chat.quick-reaction',
@@ -277,6 +278,9 @@ function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): voi
       return;
     case 'rematch.vote':
       manager.voteRematch(peer.id, message.requestId);
+      return;
+    case 'session.claim':
+      manager.claimControl(peer.id, message.requestId);
       return;
     case 'chat.message':
       manager.sendChatMessage(peer.id, message.requestId, message.text);

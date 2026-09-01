@@ -4,8 +4,8 @@ Properties that must hold at every instant, under every network condition. These
 goals — they are the definition of correctness. Every one has, or will have, a test that
 defends it. The chaos suite (`P3-05`) asserts INV-1 … INV-6 continuously during runs.
 
-**Status after Phase 3.** INV-1, INV-2, INV-3, INV-4, INV-5, INV-6 and INV-11 are all
-defended by running tests. The chaos suite asserts INV-1, INV-2, INV-4 and INV-6 after every
+**Status after Phase 4.** INV-1, INV-2, INV-3, INV-4, INV-5, INV-6 and INV-11 are all
+defended by running tests. INV-6 was tightened in Phase 4 — see below. The chaos suite asserts INV-1, INV-2, INV-4 and INV-6 after every
 delivered event across 200 seeded runs at 800ms ±400ms latency, and INV-3 at the end of each.
 INV-7 through INV-10 belong to phases that have not started.
 
@@ -70,11 +70,18 @@ many times it arrives or through how many sockets.
 that was actually delivered.
 
 ### INV-6 — One human, one player
-A single session never appears as two players, and two connections never simultaneously hold
-control of one player slot.
+A single session never appears as two players, and **at most one connection may act** on a
+player slot at any moment.
 
-*Defended by:* `P4-03`, `P4-09`.
-*How it breaks:* a second tab resuming while the first is mid-reconnect.
+**Tightened in Phase 4.** Several connections attached to one player is now legal and expected —
+a laptop and a phone, or two tabs. What must never happen is two of them being able to act. The
+invariant moved from "one connection per player" to "one *controller* per player", which is
+strictly stronger: the old wording would have been satisfied by simply refusing the second
+connection, which is exactly the behaviour D-002 rejected.
+
+*Defended by:* `P4-03`, `P4-09` (a twelve-window reconnect storm), and `e2e/ownership.spec.ts`.
+*How it breaks:* granting control without displacing the previous holder, or a client-side
+control toggle that the server does not arbitrate.
 
 ### INV-7 — Bounded memory
 Per-room attachment memory never exceeds 10MB; process-wide never exceeds 50MB. Memory

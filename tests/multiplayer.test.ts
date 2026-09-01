@@ -5,6 +5,7 @@ import {
   MAX_CHAT_IMAGE_BYTES,
   MAX_CHAT_IMAGE_DIMENSION,
   MAX_CHAT_TEXT_LENGTH,
+  PROTOCOL_VERSION,
   type ClientMessage,
   type RoomSnapshot,
   type ServerMessage,
@@ -33,7 +34,10 @@ class TestClient {
   }
 
   send(message: ClientMessage): void {
-    this.socket.send(JSON.stringify(message));
+    // Stamped exactly as the real client stamps it. Without this the harness is
+    // a v1 client, and the server now refuses those outright rather than letting
+    // them join and fail on their first move.
+    this.socket.send(JSON.stringify({ ...message, protocolVersion: PROTOCOL_VERSION }));
   }
 
   sendRaw(message: string): void {
@@ -285,12 +289,12 @@ describe('real WebSocket multiplayer authority', () => {
     expect(server.manager.getEphemeralStats(xSession.roomCode)?.imageBytes).toBe(png.byteLength);
 
     o.sendRaw(JSON.stringify({
-      type: 'chat.image', requestId: 'bad-mime', mime: 'image/webp', width: 1, height: 1,
+      type: 'chat.image', protocolVersion: PROTOCOL_VERSION, requestId: 'bad-mime', mime: 'image/webp', width: 1, height: 1,
       byteLength: png.byteLength, data: png.toString('base64'),
     }));
     expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'bad-mime')).code).toBe('INVALID_IMAGE');
     o.sendRaw(JSON.stringify({
-      type: 'chat.image', requestId: 'oversized-image', mime: 'image/png', width: 1, height: 1,
+      type: 'chat.image', protocolVersion: PROTOCOL_VERSION, requestId: 'oversized-image', mime: 'image/png', width: 1, height: 1,
       byteLength: MAX_CHAT_IMAGE_BYTES + 1, data: png.toString('base64'),
     }));
     expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'oversized-image')).code).toBe('INVALID_IMAGE');
@@ -328,8 +332,14 @@ describe('real WebSocket multiplayer authority', () => {
     await x.waitFor((message): message is Extract<ServerMessage, { type: 'chat.typing' }> => message.type === 'chat.typing' && message.isTyping);
     expect(server.manager.getEphemeralStats(xSession.roomCode)).toEqual({ messages: 2, imageBytes: png.byteLength, typingTimers: 1 });
 
-    x.send({ type: 'room.leave', requestId: 'leave-now' });
+    // Leaving no longer destroys the room for everyone - see the ownership
+    // suite for host migration. The room dies when the *last* player leaves,
+    // and that is the path that has to clear every ephemeral trace.
+    x.send({ type: 'room.leave', requestId: 'leave-x' });
     expect((await x.waitFor(isSessionEnded)).reason).toBe('LEFT');
+    await o.waitFor(snapshotWhere((snapshot) => snapshot.players.length === 1));
+
+    o.send({ type: 'room.leave', requestId: 'leave-o' });
     expect((await o.waitFor(isSessionEnded)).reason).toBe('LEFT');
     expect(server.manager.getEphemeralStats(xSession.roomCode)).toBeNull();
     expect(server.manager.size).toBe(0);
@@ -346,7 +356,7 @@ describe('real WebSocket multiplayer authority', () => {
     await move(x, o, 'before-refresh', 4, 1);
     o.close();
     const paused = await x.waitFor(snapshotWhere((snapshot) => snapshot.phase === 'paused'));
-    expect(paused.snapshot.players.find((player) => player.id === oSession.playerId)?.connected).toBe(false);
+    expect(paused.snapshot.players.find((player) => player.id === oSession.playerId)?.presence).toBe('reconnecting');
 
     const resumed = await connect();
     resumed.send({
@@ -366,11 +376,13 @@ describe('real WebSocket multiplayer authority', () => {
     expect(xRestored.snapshot).toEqual(restored.snapshot);
   });
 
-  it('lets a valid resume supersede an older socket for the same player', async () => {
+  it('lets a valid resume take the slot without duplicating the player', async () => {
+    // The displaced socket is no longer closed - it becomes a read-only view.
+    // That policy and its edges are covered in tests/ownership.test.ts; what
+    // matters here is that resuming never invents a second player.
     const original = await connect();
     original.send({ type: 'room.create', requestId: 'original-room' });
     const session = await original.waitFor(isSession);
-    const oldSocketClosed = new Promise<number>((resolve) => original.socket.once('close', resolve));
 
     const replacement = await connect();
     replacement.send({
@@ -381,8 +393,9 @@ describe('real WebSocket multiplayer authority', () => {
     });
     const resumed = await replacement.waitFor(isSession);
     expect(resumed.playerId).toBe(session.playerId);
-    expect(await oldSocketClosed).toBe(4001);
+    expect(resumed.hasControl).toBe(true);
     expect(resumed.snapshot.players).toHaveLength(1);
+    expect(resumed.snapshot.players[0].connectionCount).toBe(2);
   });
 
   it('cleans up a completely empty room', async () => {

@@ -41,6 +41,8 @@ export function GameApp() {
           connection={game.connection}
           pendingMove={game.pendingMove}
           resyncing={game.resyncing}
+          hasControl={game.hasControl}
+          onClaimControl={game.claimControl}
           onMove={game.move}
           onRematch={game.voteRematch}
           playSound={sound.play}

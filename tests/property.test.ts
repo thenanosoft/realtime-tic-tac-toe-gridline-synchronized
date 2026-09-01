@@ -143,7 +143,11 @@ describe('game engine properties (P3-07)', () => {
     expect(failures, failures.join('\n')).toEqual([]);
   });
 
-  it('refuses every illegal move from every reachable state', () => {
+  // Explicitly timed rather than riding the global 8s default: this walks 1,000
+  // seeded games and asserts several refusals at every reachable state, so it is
+  // legitimately slow and should not start failing because the suite around it
+  // grew.
+  it('refuses every illegal move from every reachable state', { timeout: 60_000 }, () => {
     const failures: string[] = [];
 
     for (let seed = 1; seed <= 1_000 && failures.length < 5; seed += 1) {

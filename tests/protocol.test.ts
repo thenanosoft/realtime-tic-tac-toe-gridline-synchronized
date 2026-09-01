@@ -146,11 +146,25 @@ describe('protocol v2', () => {
       expect(hello.minClientProtocol).toBeLessThanOrEqual(hello.protocolVersion);
     });
 
-    it('still serves a legacy client that sends no protocolVersion at all', async () => {
-      // Pages and Render deploy independently, so a new server has to keep
-      // answering the previous client for one release cycle (D-004).
+    it('refuses a v1 client at the door rather than failing it mid-match', async () => {
+      // MIN_SUPPORTED_CLIENT_PROTOCOL moved to 2 in v3, deliberately. A v1 client
+      // sends `expectedVersion`, which the schema stopped accepting in v2, so it
+      // could join happily and then fail its first move with a confusing
+      // MALFORMED_MESSAGE. Refusing it up front with an actionable message is
+      // the honest behaviour.
       const probe = await connect();
       probe.sendRaw(JSON.stringify({ type: 'room.create', requestId: 'legacy' }));
+      const rejection = await probe.waitFor(isRejection);
+      expect(rejection.code).toBe('PROTOCOL_MISMATCH');
+      expect(rejection.message).toMatch(/refresh/i);
+      expect(probe.of('session.ready')).toHaveLength(0);
+    });
+
+    it('still fully serves the previous protocol version', async () => {
+      // The skew window D-004 describes is real, so the server must keep
+      // answering one version back. Every v2 command remains valid in v3.
+      const probe = await connect();
+      probe.sendRaw(JSON.stringify({ type: 'room.create', requestId: 'v2', protocolVersion: PROTOCOL_VERSION - 1 }));
       const session = await probe.waitFor(isSession);
       expect(session.roomCode).toMatch(/^[A-HJ-NP-Z2-9]{6}$/);
     });

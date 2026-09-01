@@ -40,6 +40,19 @@ function requestId(): string {
   return crypto.randomUUID();
 }
 
+/**
+ * The single place an outbound frame is serialised.
+ *
+ * Every command must carry the protocol version. Two paths write to the socket -
+ * the `send` helper and the resume issued directly from the open handler - and
+ * when those stamped independently the resume silently went out unversioned.
+ * The server read that as protocol 1 and refused it, which broke every
+ * reconnect. One function, no second path.
+ */
+function encode(message: ClientMessage): string {
+  return JSON.stringify({ ...message, protocolVersion: PROTOCOL_VERSION });
+}
+
 function getWebSocketUrl(): string | null {
   if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
   if (window.location.protocol === 'https:' && window.location.hostname.endsWith('.github.io')) return null;
@@ -66,6 +79,15 @@ export function useGameSocket() {
    * surfaced. Marking "connected" on socket open alone is not enough.
    */
   const [resyncing, setResyncing] = useState(false);
+  /**
+   * Whether *this* window holds the player slot.
+   *
+   * Opening the same session elsewhere no longer disconnects this one - it stays
+   * attached as a read-only view and can claim the slot back (D-002). Starts
+   * true so a fresh session is playable before any control message arrives.
+   */
+  const [hasControl, setHasControl] = useState(true);
+  const [controlReason, setControlReason] = useState<'GRANTED' | 'DISPLACED' | 'RESUMED' | 'RECLAIMED' | null>(null);
   const [chatMessages, setChatMessages] = useState<ClientChatMessage[]>([]);
   const [typingPlayerId, setTypingPlayerId] = useState<string | null>(null);
   const [quickReactions, setQuickReactions] = useState<QuickReactionPopup[]>([]);
@@ -223,6 +245,8 @@ export function useGameSocket() {
     setSnapshot(null);
     setTiming(null);
     setResyncing(false);
+    setHasControl(true);
+    setControlReason(null);
     clearPrivateState();
     setNotice({ tone, text: message });
   }, [clearPrivateState]);
@@ -242,6 +266,8 @@ export function useGameSocket() {
         saveSession(nextSession);
         setLobbyBusy(false);
         setResyncing(false);
+        setHasControl(message.hasControl);
+        setControlReason(null);
         acceptSnapshot(message.snapshot, message.timing);
         replaceChat(message.chat);
         setTypingPlayerId(null);
@@ -253,6 +279,17 @@ export function useGameSocket() {
       case 'game.snapshot':
         acceptSnapshot(message.snapshot, message.timing);
         if (message.ackRequestId && pendingRef.current?.requestId === message.ackRequestId) {
+          pendingRef.current = null;
+          setPendingMove(false);
+        }
+        return;
+      case 'session.control':
+        setHasControl(message.hasControl);
+        setControlReason(message.reason);
+        // A window that just lost the slot may have had a move in flight. It will
+        // never be acknowledged now, so release the board rather than leaving it
+        // stuck behind a pending command.
+        if (!message.hasControl) {
           pendingRef.current = null;
           setPendingMove(false);
         }
@@ -357,17 +394,17 @@ export function useGameSocket() {
         setNotice((current) => current?.tone === 'error' ? current : null);
         if (sessionRef.current) {
           setResyncing(true);
-          socket.send(JSON.stringify({
+          socket.send(encode({
             type: 'session.resume',
             requestId: requestId(),
             roomCode: sessionRef.current.roomCode,
             playerToken: sessionRef.current.playerToken,
-          } satisfies ClientMessage));
+          }));
         }
         if (heartbeatRef.current) clearInterval(heartbeatRef.current);
         heartbeatRef.current = setInterval(() => {
           if (socket.readyState === WebSocket.OPEN) {
-            socket.send(JSON.stringify({ type: 'presence.ping', sentAt: Date.now() } satisfies ClientMessage));
+            socket.send(encode({ type: 'presence.ping', sentAt: Date.now() }));
           }
         }, 20_000);
       });
@@ -454,7 +491,7 @@ export function useGameSocket() {
     }
     // Every command is stamped, not just the handshake, so the protocol is
     // self-describing frame by frame rather than only at connection time.
-    socket.send(JSON.stringify({ ...message, protocolVersion: PROTOCOL_VERSION }));
+    socket.send(encode(message));
     return true;
   }, []);
 
@@ -491,6 +528,10 @@ export function useGameSocket() {
 
   const voteRematch = useCallback(() => {
     send({ type: 'rematch.vote', requestId: requestId() });
+  }, [send]);
+
+  const claimControl = useCallback(() => {
+    send({ type: 'session.claim', requestId: requestId() });
   }, [send]);
 
   const sendChatMessage = useCallback((text: string): boolean => {
@@ -548,6 +589,9 @@ export function useGameSocket() {
     snapshot,
     timing,
     resyncing,
+    hasControl,
+    controlReason,
+    claimControl,
     notice,
     lobbyBusy,
     pendingMove,

@@ -10,14 +10,28 @@ import type { Cell, Mark } from './game';
  * 2 - `revision`/`expectedRevision`, a monotonic `sequence` on every chat event,
  *     and server-relative deadlines so a skewed client clock cannot affect
  *     ordering or timeouts.
+ * 3 - a player slot and a connection become separate things: several windows may
+ *     attach to one player, exactly one holds control, and presence becomes a
+ *     four-state machine rather than a boolean. Adds `session.claim`,
+ *     `session.control`, and host identity.
  *
  * GitHub Pages and Render deploy independently, so a version skew window always
  * exists. The server therefore keeps accepting MIN_SUPPORTED_CLIENT_PROTOCOL for
  * one release cycle rather than cutting old clients off mid-match, and clients
  * compare against `server.hello` to tell the player to refresh.
  */
-export const PROTOCOL_VERSION = 2;
-export const MIN_SUPPORTED_CLIENT_PROTOCOL = 1;
+export const PROTOCOL_VERSION = 3;
+/**
+ * Raised to 2 in this release, deliberately.
+ *
+ * A v1 client cannot play against this server whatever we do - it sends
+ * `expectedVersion`, which the schema stopped accepting in v2 - so it would join
+ * happily and then fail on its first move with a confusing MALFORMED_MESSAGE.
+ * Refusing it at the door with PROTOCOL_MISMATCH and a "refresh" message is the
+ * honest behaviour. A v2 client, by contrast, is still fully served: every v2
+ * command remains valid in v3.
+ */
+export const MIN_SUPPORTED_CLIENT_PROTOCOL = 2;
 export const LEGACY_CLIENT_PROTOCOL = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
@@ -64,6 +78,10 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
     ...envelope,
   }).strict(),
   z.object({ type: z.literal('rematch.vote'), requestId, ...envelope }).strict(),
+  // "Take control here": moves the player slot to this connection. A separate
+  // command rather than a client-side toggle, because two windows can race for
+  // the slot and the loser has to be told it lost (D-002).
+  z.object({ type: z.literal('session.claim'), requestId, ...envelope }).strict(),
   z.object({ type: z.literal('chat.message'), requestId, text: z.string().min(1).max(MAX_CHAT_TEXT_LENGTH), ...envelope }).strict(),
   z.object({ type: z.literal('chat.typing'), typing: z.boolean(), ...envelope }).strict(),
   z.object({ type: z.literal('chat.quick-reaction'), requestId, reaction: z.enum(QUICK_REACTIONS), ...envelope }).strict(),
@@ -97,11 +115,27 @@ export type RoomPhase =
   | 'game_over'
   | 'rematch_waiting';
 
+/**
+ * Server-authoritative presence. The client renders this; it never derives it.
+ *
+ * online        at least one window is attached
+ * reconnecting  no window attached, still inside the reconnect grace period
+ * offline       grace elapsed, but the slot is still reserved by token
+ * expired       the reservation has lapsed and the slot is gone
+ */
+export type PresenceState = 'online' | 'reconnecting' | 'offline' | 'expired';
+
 export interface PlayerSnapshot {
   id: string;
   name: string;
   mark: Mark;
-  connected: boolean;
+  presence: PresenceState;
+  /**
+   * How many windows or devices are attached to this player. Exactly one of
+   * them holds control; the rest are read-only views (D-002).
+   */
+  connectionCount: number;
+  isHost: boolean;
   wantsRematch: boolean;
 }
 
@@ -199,6 +233,8 @@ export type RejectionCode =
   | 'IMAGE_TOO_LARGE'
   | 'RATE_LIMITED'
   | 'PROTOCOL_MISMATCH'
+  /** This window is attached but another one holds the player slot. */
+  | 'NOT_IN_CONTROL'
   | 'INTERNAL_ERROR';
 
 export type ServerMessage =
@@ -218,9 +254,22 @@ export type ServerMessage =
       playerId: string;
       displayName: string;
       mark: Mark;
+      /** Whether *this* connection holds the player slot, not whether one exists. */
+      hasControl: boolean;
       snapshot: RoomSnapshot;
       timing: RoomTiming;
       chat: ChatSnapshot;
+    }
+  | {
+      /**
+       * Per-connection, never broadcast: control is a property of a socket, not
+       * of the room. Sent when this window gains or loses the player slot.
+       */
+      type: 'session.control';
+      hasControl: boolean;
+      reason: 'GRANTED' | 'DISPLACED' | 'RESUMED' | 'RECLAIMED';
+      connectionCount: number;
+      ackRequestId?: string;
     }
   | { type: 'game.snapshot'; snapshot: RoomSnapshot; timing: RoomTiming; ackRequestId?: string }
   | { type: 'chat.message'; message: ChatMessageSnapshot; ackRequestId?: string }

@@ -32,11 +32,27 @@ Gridline is a server-authoritative, two-player Tic-Tac-Toe game with temporary p
 
 `shared/protocol.ts` contains the discriminated client schema, server union, snapshots, limits, sticker/reaction allowlists, and rejection codes. `shared/game.ts` remains the pure tested game engine.
 
-The wire protocol is at **version 2**. Every client command may carry an optional
-`protocolVersion`; its absence is read as version 1 so a client built before
-versioning still works. `server.hello` advertises the server's `protocolVersion`
-and `minClientProtocol`, and a client outside that range is told to refresh
-rather than left to fail silently.
+The wire protocol is at **version 3**, and the server serves version 2 as well.
+`server.hello` advertises `protocolVersion` and `minClientProtocol`; a client
+outside that range is told to refresh rather than left to fail silently.
+
+Version 1 is deliberately refused. It sends `expectedVersion`, which the schema
+stopped accepting in v2, so it could join a room and then fail its first move
+with a confusing error — advertising support we cannot honour is worse than an
+actionable refusal at the door.
+
+**Sessions and windows.** A player slot and a connection are separate things.
+Several windows or devices may attach to one player; exactly one holds the slot
+and may act. Opening a session somewhere else moves control there and leaves the
+previous window attached as an explicit read-only view that can claim it back —
+it is never disconnected. Presence is a server-owned four-state machine
+(`online`, `reconnecting`, `offline`, `expired`) derived from connections and the
+clock, and the server announces transitions the clock alone would otherwise hide.
+
+**Rooms outlive their opener.** Leaving frees your slot; the room survives for
+the remaining player, the host capability migrates, and the code stays joinable.
+The room is destroyed only when the last player leaves. Chat is purged on
+departure, because the conversation was private to the two people in it.
 
 **Ordering.** Nothing on the client is ordered by arrival or by a clock.
 
@@ -69,6 +85,7 @@ Client → server:
 - `session.resume { requestId, roomCode, playerToken }`
 - `game.move { requestId, cell, expectedRevision }`
 - `rematch.vote { requestId }`
+- `session.claim { requestId }` — take the player slot on this connection
 - `chat.message`, `chat.typing`, `chat.sticker`, `chat.image`
 - `chat.quick-reaction`, `chat.message-reaction`
 - `presence.ping`
@@ -78,7 +95,8 @@ All of the above additionally accept `protocolVersion`.
 Server → client:
 
 - `server.hello` with `protocolVersion` and `minClientProtocol`
-- `session.ready` with `playerId`, `playerToken`, `displayName`, game snapshot, `timing`, and active-room RAM chat snapshot
+- `session.ready` with `playerId`, `playerToken`, `displayName`, `hasControl`, game snapshot, `timing`, and active-room RAM chat snapshot
+- `session.control` — per-connection, sent when this window gains or loses the slot
 - `game.snapshot` with `snapshot` and `timing`
 - `chat.message`, `chat.typing`, `chat.message-reaction`, `chat.quick-reaction`, each carrying `sequence`
 - `session.ended`, `command.rejected`, `server.notice`

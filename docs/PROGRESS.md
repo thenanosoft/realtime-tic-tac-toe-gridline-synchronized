@@ -403,3 +403,75 @@ D-008 records what was actually observed: the two deploys cannot be sequenced, t
 still answering while the Pages build ran, and the honest-degradation path from `P2-01` is what
 covers the gap. In this instance the ordering worked out in our favour anyway — the backend was
 live in 21 seconds and the frontend deploy failed, so no v2 client ever met a v1 server.
+
+---
+
+## 2026-08-31 — Phase 4 closed: presence, ownership and host migration
+
+Branch `phase/4-presence-and-ownership`. Gates: **104 unit tests** (up from 100) and **20
+end-to-end tests** (up from 16), typecheck clean, lint clean, both builds succeed.
+
+### The structural change
+
+A **player slot and a connection are now separate things**. A player holds
+`connections: Map<peerId, Peer>` and a `controllingPeerId`; several windows may attach, exactly
+one may act. Everything else in the phase follows from that.
+
+`resumeSession` no longer closes the previous socket with code 4001. It attaches the new window,
+grants it control, and tells the displaced one *why* — which is D-002 as decided. The demoted
+window keeps receiving every authoritative update, because a read-only view showing a stale
+board would be worse than no view at all.
+
+Presence became a four-state machine derived from connections and the clock rather than a stored
+boolean, so it cannot drift from what defines it.
+
+### Three real bugs, each found by a test rather than by review
+
+**1. The presence transition nobody would ever see.** `reconnecting → offline` is the passage of
+time with no event to carry it. The server was right and every screen was wrong: an opponent
+would sit on "Reconnecting…" indefinitely. The sweep now compares derived presence against what
+was last announced and broadcasts the drift.
+
+**2. Raising the protocol floor broke every reconnect.** `MIN_SUPPORTED_CLIENT_PROTOCOL` moved
+to 2 (D-009). The end-to-end suite immediately failed with *"This version of Gridline is too old"*
+— on the **second** window, not the first. `session.resume` was written straight to the socket
+from the open handler rather than through the `send` helper, so it was the one command that never
+got a `protocolVersion` stamped. The server read it as protocol 1 and refused it.
+
+The bug was not the version bump; it was having two places that stamped independently. A single
+`encode()` is now the only place an outbound frame is serialised.
+
+**3. Host migration created an unplayable room.** With the room surviving its opener, a leaving X
+left an O behind — and `joinRoom` handed out `'O'` unconditionally, a rule that was only ever
+safe while the creator was permanently X. Two O players, no X, and the turn sitting on a mark
+nobody held. `joinRoom` now takes whichever mark is free.
+
+That one was caught by the end-to-end suite playing a move after a newcomer joined, which is
+exactly the kind of thing a unit test asserting "the room survived" would have missed.
+
+### Leaving a room changed meaning
+
+It used to destroy the room for both players — a room died with whoever opened it. Now the slot
+is freed, host migrates, the board resets to `waiting`, and the room stays joinable on the same
+code. It is destroyed only when the last player leaves.
+
+**Chat is purged on departure.** The conversation was private to the two people in it, and
+whoever takes the freed slot next must not be able to read it. The confirm copy changed
+accordingly: "Leave this room?" rather than "End this private session for both players?"
+
+### INV-6 got stronger, not weaker
+
+From "one connection per player" to "at most one *controller* per player". The old wording would
+have been satisfied by simply refusing the second connection — which is precisely the behaviour
+D-002 rejected. Defended by a twelve-window reconnect storm on a single token: still one player,
+still exactly one window holding the slot, and a bystander's move refused with `NOT_IN_CONTROL`.
+
+### An hour lost to a stale port, worth recording
+
+Four end-to-end tests failed with the app stuck on "Connecting", and no server listening
+afterwards. The first theory — a stale process holding 3001 — was wrong; 3001 was free. The
+actual cause was the protocol-stamping bug above, and the diagnostic route that found it was
+reading Playwright's captured page snapshot, which showed the rejection message verbatim.
+
+Two strays *were* found and killed on 3399 and 3477, left by earlier background runs where
+`kill` had terminated the `npx` wrapper rather than the node child. Worth knowing for next time.

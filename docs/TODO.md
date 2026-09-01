@@ -124,25 +124,38 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 4 — Presence, identity and socket ownership
 
-- [ ] **P4-01** Server-authoritative presence state machine: `online → reconnecting → offline →
-      expired`, with legal transitions enumerated and tested.
+- [x] **P4-01** `PresenceState` is derived from connections and the clock, never stored, so it
+      cannot drift from what defines it. **The sweep announces drift**: the move from
+      `reconnecting` to `offline` is the passage of time with no event to carry it, so without
+      that the opponent would sit on "Reconnecting…" forever — correct on the server, wrong on
+      every screen. Caught by a test.
 - [x] **P4-02** Policy decided and documented (D-002, 2026-08-31): **newest connection takes
       control, displaced connection becomes explicitly read-only** rather than disconnected.
-- [ ] **P4-03** Implement it. Today `resumeSession` closes the older socket with code 4001. Per
-      D-002 it must instead demote that connection to read-only, keep it attached, and never
-      create a duplicate player. Requires separating *player slot* from *connection*.
-- [ ] **P4-04** Communicate ownership in the UI — the non-controlling tab states plainly that it
-      is read-only and why, and offers **Take control here**. That reversal is a
-      server-authoritative command, never a client-side toggle: two tabs may race for the slot
-      and the loser must be told it lost.
-- [ ] **P4-05** Cross-device session reclaim: laptop → phone with identical identity and mark.
-- [ ] **P4-06** Separate host capability from player slot so the creator is not structurally
-      special.
-- [ ] **P4-07** Host migration: creator leaves, room survives, remaining player keeps playing.
-      Currently `leaveRoom` destroys the room for both.
-- [ ] **P4-08** Server restart behaviour: clients reach a clear "session lost" terminal state
-      with a path to a new room, and never hang.
-- [ ] **P4-09** Presence tests under chaos: rapid reconnect storms produce no duplicate players.
+- [x] **P4-03** A player now holds `connections: Map<peerId, Peer>` and a `controllingPeerId`.
+      `resumeSession` attaches and grants control instead of closing with 4001; every mutating
+      command goes through `requireControl` and a read-only window gets `NOT_IN_CONTROL`.
+      Control also passes to a surviving window when the controller disconnects, so losing one
+      tab of two does not pause the match.
+- [x] **P4-04** `.control-banner` says it in words and offers **Take control here**. The board
+      stays fully legible and live rather than greyed out — the demoted window keeps watching,
+      which is the point. The claim is a `session.claim` command; a two-window race is tested
+      to produce exactly one winner.
+- [x] **P4-05** Tested: laptop drops, phone resumes by token with the same `playerId`, display
+      name and mark, takes control, and the room still holds exactly two players.
+- [x] **P4-06** `Room.hostPlayerId` plus `isHost` in the snapshot. The capability carries no
+      powers yet — those arrive with the token model in Phase 6 — but the migration has to exist
+      before anything can depend on it.
+- [x] **P4-07** `leaveRoom` frees one slot instead of destroying the room; host migrates, the
+      board resets to `waiting`, and the room stays joinable. Chat is purged on departure — it
+      was private to the two people in it. **This surfaced a real bug**: `joinRoom` handed out
+      `'O'` unconditionally, so once an X could leave a surviving room the newcomer became a
+      second O and nobody held the turn. It now takes whichever mark is free.
+- [x] **P4-08** Tested across an actual process restart on the same port: the old token is
+      refused with `ROOM_NOT_FOUND` and the same socket can immediately open a new room, so the
+      client is never stuck retrying a dead token (D-003).
+- [x] **P4-09** A twelve-window reconnect storm on one token: still exactly one player, exactly
+      one window holding the slot, and a bystander's move refused with `NOT_IN_CONTROL`. Plus a
+      burst-closure test proving presence stays `online` while any window survives.
 
 ## Phase 5 — Optimistic UI with rollback
 

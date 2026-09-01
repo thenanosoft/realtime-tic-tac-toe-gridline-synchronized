@@ -18,6 +18,8 @@ interface GameRoomProps {
   connection: ConnectionState;
   pendingMove: boolean;
   resyncing: boolean;
+  hasControl: boolean;
+  onClaimControl(): void;
   onMove(cell: number): void;
   onRematch(): void;
   playSound: ReturnType<typeof useGameSound>['play'];
@@ -41,6 +43,8 @@ export function GameRoom({
   connection,
   pendingMove,
   resyncing,
+  hasControl,
+  onClaimControl,
   onMove,
   onRematch,
   playSound,
@@ -69,6 +73,7 @@ export function GameRoom({
   // drop. Until the server confirms the resumed session, this snapshot is stale.
   const canMove = connection === 'connected'
     && !resyncing
+    && hasControl
     && snapshot.phase === 'active'
     && snapshot.turn === self?.mark
     && !pendingMove;
@@ -144,7 +149,19 @@ export function GameRoom({
   };
 
   return (
-    <section className={`room-shell scene-${sceneState} ${chatOpen ? 'chat-open' : ''}`}>
+    <section className={`room-shell scene-${sceneState} ${chatOpen ? 'chat-open' : ''} ${hasControl ? '' : 'is-readonly'}`}>
+      {!hasControl && (
+        // Said in words, not implied by a dead board. The window is still fully
+        // live - it just is not the one holding the slot (D-002).
+        <div className="control-banner" role="status">
+          <span aria-hidden="true">⌁</span>
+          <p>
+            <strong>Another window has control of this session.</strong>
+            This view stays live, but moves and messages come from there.
+          </p>
+          <button className="claim-control" onClick={onClaimControl}>Take control here</button>
+        </div>
+      )}
       <div className="arena-light light-x" aria-hidden="true" />
       <div className="arena-light light-o" aria-hidden="true" />
       <div className="room-stage">
@@ -162,7 +179,12 @@ export function GameRoom({
             <button className={`copy-room ${copied ? 'copied' : ''}`} onClick={copyCode} aria-label={`Copy invitation link for room ${snapshot.roomCode}`}>
               <span className="copy-icon" aria-hidden="true" />{copied ? 'Copied' : 'Copy invite'}
             </button>
-            <button className="leave-room" onClick={() => { if (window.confirm('End this private session for both players?')) onLeave(); }} disabled={connection !== 'connected'} aria-label="End private session">×</button>
+            <button
+              className="leave-room"
+              onClick={() => { if (window.confirm('Leave this room? Your opponent keeps the room and can invite someone else.')) onLeave(); }}
+              disabled={connection !== 'connected' || !hasControl}
+              aria-label="Leave this room"
+            >×</button>
           </div>
         </div>
 

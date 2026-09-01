@@ -15,7 +15,10 @@ export function GameStatus({ snapshot, session, onRematch }: { snapshot: RoomSna
   if (snapshot.phase === 'countdown') {
     eyebrow = 'SIGNAL FOUND'; title = 'Two minds connected.'; detail = `Round ${snapshot.round} is about to begin.`; tone = 'starting';
   } else if (snapshot.phase === 'paused') {
-    eyebrow = 'MATCH SUSPENDED'; title = opponent?.connected ? 'Connection interrupted' : 'Their signal went quiet.'; detail = 'The board is held exactly as it was.'; tone = 'offline';
+    eyebrow = 'MATCH SUSPENDED';
+    title = opponent?.presence === 'reconnecting' ? 'They are reconnecting.' : 'Their signal went quiet.';
+    detail = 'The board is held exactly as it was.';
+    tone = 'offline';
   } else if (snapshot.phase === 'active') {
     eyebrow = yourTurn ? 'YOUR TURN' : 'THEIR TURN'; title = yourTurn ? 'The plane is yours.' : 'The room is listening to them.'; detail = yourTurn ? 'Choose an open coordinate.' : 'Your side will return when their move lands.'; tone = yourTurn ? 'your-turn' : 'their-turn';
   } else if (complete) {
@@ -41,7 +44,7 @@ export function GameStatus({ snapshot, session, onRematch }: { snapshot: RoomSna
         <p>{detail}</p>
       </div>
       {complete && (
-        <button className="rematch-button" onClick={onRematch} disabled={selfVoted || !opponent?.connected}>
+        <button className="rematch-button" onClick={onRematch} disabled={selfVoted || opponent?.presence !== 'online'}>
           <span aria-hidden="true">↻</span>{rematchLabel}
         </button>
       )}
