@@ -104,8 +104,11 @@ const x = await Client.connect('X');
 const o = await Client.connect('O');
 
 const hello = await x.waitFor((m) => m.type === 'server.hello');
-check('server advertises protocol v2', hello.protocolVersion === 2, 'got ' + hello.protocolVersion);
-check('server advertises minClientProtocol', hello.minClientProtocol === 1, 'got ' + hello.minClientProtocol);
+// Compared against the constant, not a literal: this script exists to tell us
+// whether the deployed server matches this source tree, so hardcoding a version
+// here would make it answer a question about the past.
+check('server speaks this protocol version', hello.protocolVersion === PROTOCOL_VERSION, 'got ' + hello.protocolVersion + ', source says ' + PROTOCOL_VERSION);
+check('server still serves one version back', hello.minClientProtocol <= PROTOCOL_VERSION - 1, 'minClientProtocol ' + hello.minClientProtocol);
 
 x.send({ type: 'room.create', requestId: 'smoke-create' });
 const xs = await x.waitFor((m) => m.type === 'session.ready');
@@ -120,6 +123,9 @@ o.send({ type: 'room.join', requestId: 'smoke-join', roomCode: xs.roomCode });
 const os = await o.waitFor((m) => m.type === 'session.ready');
 o.mark = os.mark;
 check('second player joined', os.mark === 'O' && xs.mark === 'X');
+check('the opener is host', xs.snapshot.players.filter((p) => p.isHost).length === 1);
+check('presence is a state, not a boolean', xs.snapshot.players.every((p) => p.presence === 'online'));
+check('this window holds the slot', xs.hasControl === true && os.hasControl === true);
 check('identities differ', os.displayName !== xs.displayName, xs.displayName + ' vs ' + os.displayName);
 
 await x.waitUntil((s) => s.phase === 'active', 'the match to start');
@@ -157,9 +163,14 @@ x.socket.send(JSON.stringify({ type: 'room.create', requestId: 'smoke-future', p
 const rejection = await x.waitFor((m) => m.type === 'command.rejected' && m.requestId === 'smoke-future');
 check('future protocol rejected with PROTOCOL_MISMATCH', rejection.code === 'PROTOCOL_MISMATCH', rejection.code);
 
+// Leaving frees a slot rather than ending the room. The survivor keeps a live
+// room on the same code, and the host capability moves to them.
 x.send({ type: 'room.leave', requestId: 'smoke-leave' });
-await o.waitFor((m) => m.type === 'session.ended');
-check('leaving destroyed the room for both', true);
+await x.waitFor((m) => m.type === 'session.ended');
+await o.waitUntil((s) => s.players.length === 1, 'the room to survive the departure');
+check('the room outlived the player who opened it', o.snapshot().players.length === 1);
+check('host migrated to the survivor', o.snapshot().players[0].isHost === true);
+check('the board reset for a new opponent', o.snapshot().phase === 'waiting' && o.snapshot().board.every((c) => c === null));
 
 x.close(); o.close();
 console.log(process.exitCode ? '\nPRODUCTION SMOKE TEST FAILED' : '\nPRODUCTION SMOKE TEST PASSED');
