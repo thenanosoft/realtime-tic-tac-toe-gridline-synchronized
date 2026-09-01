@@ -39,8 +39,8 @@ export function GameApp() {
           timing={game.timing}
           session={game.session}
           connection={game.connection}
-          pendingMove={game.pendingMove}
           resyncing={game.resyncing}
+          speculation={game.speculation}
           hasControl={game.hasControl}
           onClaimControl={game.claimControl}
           onMove={game.move}

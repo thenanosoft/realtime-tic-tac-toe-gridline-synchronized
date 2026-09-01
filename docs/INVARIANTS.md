@@ -4,15 +4,21 @@ Properties that must hold at every instant, under every network condition. These
 goals — they are the definition of correctness. Every one has, or will have, a test that
 defends it. The chaos suite (`P3-05`) asserts INV-1 … INV-6 continuously during runs.
 
-**Status after Phase 4.** INV-1, INV-2, INV-3, INV-4, INV-5, INV-6 and INV-11 are all
-defended by running tests. INV-6 was tightened in Phase 4 — see below. The chaos suite asserts INV-1, INV-2, INV-4 and INV-6 after every
+**Status after Phase 5.** INV-1, INV-2, INV-3, INV-4, INV-5, INV-6 and INV-11 are all
+defended by running tests. INV-6 was tightened in Phase 4, and INV-2 became a real property
+rather than a tautology in Phase 5 — see both below. The chaos suite asserts INV-1, INV-2, INV-4 and INV-6 after every
 delivered event across 200 seeded runs at 800ms ±400ms latency, and INV-3 at the end of each.
 INV-7 through INV-10 belong to phases that have not started.
 
 ---
 
 ### INV-1 — Turn exclusivity
-At no point may two clients simultaneously be **able to act**.
+At no point may two clients simultaneously be **able to act**, and no client may act twice
+against a board the server has not confirmed.
+
+**Extended in Phase 5.** Optimistic rendering introduced a second way to break this that has
+nothing to do with the opponent: a player could place two marks in a row locally. An outstanding
+speculation therefore blocks further moves, which is why `canPlay` takes it as an input.
 
 **Refined in Phase 3.** The original wording — "believe it is their turn" — is not enforceable
 as written. Mid-propagation, one client may still hold revision 5 (its turn) while the other
@@ -35,9 +41,23 @@ confirmed it — a reconnect, a resume, or a future optimistic turn flip.
 ### INV-2 — No phantom moves
 At no point may a client display a move that the authoritative server has rejected.
 
-*Defended by:* `P5-03`, `P5-04`, chaos suite.
-*How it breaks:* speculative rendering without a rollback path, or a rollback that races a
-newer snapshot.
+**This only became a real property in Phase 5.** While the client was strictly pessimistic it
+held nothing but server-supplied snapshots, so the invariant was true by construction and the
+test for it was measuring nothing. Optimistic rendering is what makes it possible to violate,
+and so what makes it worth asserting.
+
+The check therefore moved from the snapshot to the **visible board** — the authoritative board
+plus any optimistic overlay. Two things are forbidden: showing a mark where the server has a
+different one, and showing a mark the server does not have at a square this client is not
+currently waiting on. A mark still in flight is not a violation; a mark left standing after the
+answer arrived is.
+
+Exactly one function, `settleSpeculation`, removes an optimistic mark, which is what makes this
+invariant reviewable rather than diffuse.
+
+*Defended by:* `P5-03`, `P5-04`, the chaos suite (200 seeded runs), and `e2e/optimistic.spec.ts`.
+*How it breaks:* a rollback path that misses a case — an explicit rejection, a newer board
+without our mark, losing window control, or the server simply never answering.
 
 ### INV-3 — Convergence
 After connectivity stabilises, all clients in a room converge to exactly the same

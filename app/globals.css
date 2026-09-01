@@ -786,6 +786,29 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   filter: drop-shadow(0 0 19px rgba(var(--o-rgb), .16));
   animation: draw-o .48s var(--ease-fast) forwards, symbol-impact .42s var(--ease-fast) both;
 }
+/* A mark this client has placed but the server has not confirmed (P5-01).
+   Deliberately legible rather than ghostly: the player made a real decision and
+   it will almost always stand. The reduced weight and slow breath say "in
+   flight", not "maybe". */
+.game-cell.unconfirmed .drawn-x,
+.game-cell.unconfirmed .drawn-o {
+  opacity: .52;
+  filter: none;
+  animation: symbol-impact .42s var(--ease-fast) both, awaiting-confirmation 1.4s .42s ease-in-out infinite;
+}
+.game-cell.unconfirmed::after {
+  content: '';
+  position: absolute;
+  bottom: 12%;
+  left: 50%;
+  width: 16%;
+  height: 2px;
+  border-radius: 99px;
+  transform: translateX(-50%);
+  background: currentColor;
+  opacity: .3;
+  animation: awaiting-confirmation 1.4s ease-in-out infinite;
+}
 .game-cell.winning { background: radial-gradient(circle, color-mix(in srgb, currentColor 9%, transparent), transparent 68%); animation: winning-cell 1.6s ease-in-out infinite; }
 .game-cell.mark-x { color: var(--x); }
 .game-cell.mark-o { color: var(--o); }
@@ -1044,6 +1067,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 @keyframes draw-o { from { --arc: 0deg; opacity: .18; transform: rotate(-90deg) scale(.92); } to { --arc: 360deg; opacity: 1; transform: rotate(-90deg) scale(1); } }
 @keyframes symbol-impact { 0%, 78% { scale: .94; } 100% { scale: 1; } }
 @keyframes winning-cell { 50% { filter: brightness(1.12); transform: scale(.987); } }
+@keyframes awaiting-confirmation { 50% { opacity: .78; } }
 @keyframes win-line { from { opacity: 0; scale: 0 1; filter: blur(4px); } to { opacity: 1; scale: 1 1; filter: blur(0); } }
 @keyframes count-pop { from { opacity: 0; transform: scale(.66); } to { opacity: 1; transform: none; } }
 @keyframes countdown-orbit { from { opacity: 0; transform: scale(.5); } to { opacity: 1; transform: none; } }

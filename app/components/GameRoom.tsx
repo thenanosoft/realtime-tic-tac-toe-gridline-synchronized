@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import type { MessageReaction, QuickReaction, RoomSnapshot, RoomTiming, StickerId } from '../../shared/protocol';
+import { canPlay, type Speculation } from '../lib/speculation';
 import type { StoredSession } from '../lib/session';
 import type { ClientChatMessage, ConnectionState, QuickReactionPopup } from '../hooks/useGameSocket';
 import { PlayerCard } from './PlayerCard';
@@ -16,8 +17,8 @@ interface GameRoomProps {
   timing: RoomTiming | null;
   session: StoredSession;
   connection: ConnectionState;
-  pendingMove: boolean;
   resyncing: boolean;
+  speculation: Speculation | null;
   hasControl: boolean;
   onClaimControl(): void;
   onMove(cell: number): void;
@@ -41,8 +42,8 @@ export function GameRoom({
   timing,
   session,
   connection,
-  pendingMove,
   resyncing,
+  speculation,
   hasControl,
   onClaimControl,
   onMove,
@@ -68,15 +69,19 @@ export function GameRoom({
   const xPlayer = snapshot.players.find((player) => player.mark === 'X');
   const oPlayer = snapshot.players.find((player) => player.mark === 'O');
   const self = snapshot.players.find((player) => player.id === session.playerId);
-  // `connection === 'connected'` alone is not sufficient: it flips the instant
+  // Every condition that gates acting lives in one pure function, shared with
+  // the chaos simulation. `connected` alone is not enough: it flips the instant
   // the socket opens, while the board still holds whatever was true before the
-  // drop. Until the server confirms the resumed session, this snapshot is stale.
-  const canMove = connection === 'connected'
-    && !resyncing
-    && hasControl
-    && snapshot.phase === 'active'
-    && snapshot.turn === self?.mark
-    && !pendingMove;
+  // drop; and an outstanding speculation must block a second move, or a player
+  // could place two marks against a board the server has not confirmed.
+  const canMove = canPlay({
+    connected: connection === 'connected',
+    resyncing,
+    hasControl,
+    snapshot,
+    mark: self?.mark,
+    speculation,
+  });
   const sceneState = snapshot.winner
     ? `winner-${snapshot.winner.toLowerCase()}`
     : snapshot.isDraw
@@ -194,11 +199,16 @@ export function GameRoom({
           <div className="board-area">
             <div className="board-frame">
               <div className="board-meta"><span>01 / SERVER-AUTHORITATIVE</span><span>SYNC {String(snapshot.revision).padStart(3, '0')}</span></div>
-              <GameBoard snapshot={snapshot} myMark={self?.mark ?? session.mark} interactive={canMove} onMove={onMove} />
+              <GameBoard
+                snapshot={snapshot}
+                myMark={self?.mark ?? session.mark}
+                interactive={canMove}
+                speculation={speculation}
+                onMove={onMove}
+              />
               {snapshot.phase === 'countdown' && timing?.countdownMsRemaining != null && (
                 <Countdown msRemaining={timing.countdownMsRemaining} revision={snapshot.revision} />
               )}
-              {pendingMove && <div className="move-pending"><span /> Confirming move</div>}
               <div className="reaction-popups" aria-live="polite">
                 {quickReactions.map((reaction) => {
                   const mark = snapshot.players.find((player) => player.id === reaction.senderId)?.mark ?? 'X';

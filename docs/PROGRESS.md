@@ -475,3 +475,88 @@ reading Playwright's captured page snapshot, which showed the rejection message 
 
 Two strays *were* found and killed on 3399 and 3477, left by earlier background runs where
 `kill` had terminated the `npx` wrapper rather than the node child. Worth knowing for next time.
+
+---
+
+## 2026-09-01 — Phase 5 closed: optimistic moves with rollback
+
+Branch `phase/5-optimistic-ui`. Gates: **120 unit tests** (up from 104) and **24 end-to-end
+tests** (up from 20), typecheck clean, lint clean, both builds succeed.
+
+### The first phase since Phase 1 that a player will actually feel
+
+Every move used to wait a full round trip to Singapore before anything appeared. Now the mark
+lands on click and settles a moment later. That is the whole user-visible point of the phase —
+phases 2, 3 and 4 were deliberately invisible, and it was worth saying so out loud sooner.
+
+### INV-2 was a tautology until now, and the test knew nothing
+
+While the client was strictly pessimistic it rendered nothing but server-supplied snapshots, so
+"no client displays a move the server rejected" was true by construction. The chaos suite had
+been asserting it against `client.snapshot.board` — a board the server had literally just sent.
+It could not have failed.
+
+Optimistic rendering is what makes the invariant violable, and therefore what makes it worth
+having. The check moved from the snapshot to the **visible board**: the authoritative board plus
+any overlay. Two things are now forbidden — a mark where the server has a different one, and a
+mark the server does not have at a square this client is not waiting on. A move in flight is
+fine; a move still on screen after the answer arrived is not.
+
+### Design decisions worth recording
+
+**The overlay never covers an occupied square.** If the authority already has something there,
+it wins immediately rather than waiting for reconciliation — otherwise a losing race would paint
+our mark over someone else's for a full round trip.
+
+**Reconciliation asks what the board shows, not how far it moved.** A revision can jump by more
+than one when our move and the opponent's reply arrive together, so counting revisions would
+misread that as a rejection.
+
+**Silence is not confirmation.** An unacknowledged move is withdrawn after five seconds. Without
+that, a dropped frame would leave a mark on the board forever with nothing in flight to resolve
+it.
+
+**The mark stays put across a brief disconnect.** Clearing it on socket close would flicker it
+off and straight back on for every reconnect, and the resume snapshot reconciles it correctly
+either way. If the socket never returns, the timeout takes it off.
+
+**An outstanding speculation blocks the next move.** This is a second, new way to break INV-1
+that has nothing to do with the opponent: without it a player could place two marks in a row
+locally against a board the server has not seen.
+
+### A duplication removed rather than added to
+
+`pendingMove`/`pendingRef` and the new speculation state were two parallel notions of "a move is
+in flight", cleared in six different places between them. That is exactly the shape of the
+Phase 4 stamping bug, where two independent places were responsible for one fact. The old pair
+is gone; `speculation` is the single source of truth, and `settleSpeculation` the only path by
+which it clears.
+
+The "Confirming move" chip went with it. The mark's own in-flight styling says the same thing,
+attached to the object in question rather than floating beside it.
+
+### One test fixture corrected
+
+A chaos assertion pinned `duplicatesSent > 0` for a single seed. Optimistic moves changed how
+much randomness a run consumes, that seed's draw shifted, and the assertion failed while every
+invariant still held — a fixture problem wearing the costume of a regression. The single-seed
+test now uses a duplicate rate where zero is effectively impossible, and the 200-run sweep
+asserts in aggregate that duplication and disconnection actually fired at all. A suite that
+quietly stopped exercising its own chaos knobs would otherwise keep reporting a clean bill of
+health.
+
+### The end-to-end suite had to stop racing the feature
+
+One optimistic test passed alone and failed in the full suite. Against a local server the
+confirmation lands in roughly a millisecond, so the in-flight window closed before Playwright's
+first poll — the test was trying to *catch* a state whose brevity is the entire point of the
+phase.
+
+Racing it harder would only have moved the flake around. Instead `e2e/support/slowMoves.ts`
+holds `game.move` at the transport, which makes the window deterministic while leaving the
+client, the server and the protocol completely real — only the wire is slower. The same gate,
+set to hold forever, is what tests rollback. Verified by running the suite twice over.
+
+Worth stating plainly: this is the second time a Playwright failure turned out to be the test's
+timing assumption rather than the product, and both times the fix was to remove the race rather
+than widen the timeout.

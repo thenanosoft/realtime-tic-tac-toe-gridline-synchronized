@@ -72,10 +72,15 @@ describe('chaos matches (P3-04, P3-05, P3-06)', () => {
   }, 30_000);
 
   it('converges after duplication, reordering and repeated disconnects', async () => {
+    // duplicateRate is high enough that zero duplicates is effectively
+    // impossible over a match's worth of frames. Pinning a lower rate made this
+    // assertion depend on one seed's incidental draw, and it broke the moment
+    // optimistic moves changed how much randomness the run consumes - a fixture
+    // problem masquerading as a regression.
     const result = await runChaosMatch({
       seed: 8080,
-      profile: { ...BRUTAL_CHAOS, duplicateRate: 0.15 },
-      disconnectRate: 0.12,
+      profile: { ...BRUTAL_CHAOS, duplicateRate: 0.4 },
+      disconnectRate: 0.2,
       advance,
     });
     expect(summarise(8080, result)).toContain('finished=true');
@@ -94,6 +99,8 @@ describe('chaos matches (P3-04, P3-05, P3-06)', () => {
     const failures: string[] = [];
     let converged = 0;
     let finished = 0;
+    let duplicates = 0;
+    let disconnects = 0;
 
     for (let seed = 1; seed <= 200; seed += 1) {
       const result = await runChaosMatch({
@@ -103,6 +110,8 @@ describe('chaos matches (P3-04, P3-05, P3-06)', () => {
         advance,
       });
       if (result.violations.length) failures.push(summarise(seed, result));
+      duplicates += result.duplicatesSent;
+      disconnects += result.disconnects;
       if (result.finished) {
         finished += 1;
         const server = JSON.stringify(result.serverSnapshot);
@@ -115,6 +124,11 @@ describe('chaos matches (P3-04, P3-05, P3-06)', () => {
     // completing matches would otherwise keep reporting a clean bill of health.
     expect(finished).toBe(200);
     expect(converged).toBe(200);
+    // The chaos knobs must actually be firing across the sweep. A suite that
+    // quietly stopped duplicating or disconnecting would keep reporting a clean
+    // bill of health while testing almost nothing.
+    expect(duplicates, 'no duplicated commands across 200 runs').toBeGreaterThan(0);
+    expect(disconnects, 'no disconnects across 200 runs').toBeGreaterThan(0);
   }, 180_000);
 
   it('reproduces a run exactly from its seed', async () => {

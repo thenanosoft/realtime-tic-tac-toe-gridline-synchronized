@@ -16,7 +16,13 @@ Gridline is a server-authoritative, two-player Tic-Tac-Toe game with temporary p
 - **Vinext + React 19 + TypeScript** remain the primary app architecture and local/hosted Sites build.
 - A separate `next build` static-export target creates `out/` for GitHub Pages with the repository base path applied automatically.
 - `useGameSocket` owns connection, heartbeat, exponential-backoff reconnect, token resume, monotonic game snapshots, ephemeral chat state, typing expiry, quick-reaction timers, upload preparation, and Blob URL cleanup.
-- The browser never applies a move optimistically. Chat items appear only after the authoritative server broadcasts them.
+- The browser renders a move immediately, before the server confirms it, and marks it visibly
+  as in flight. The authoritative board is always the base and the optimistic mark is only an
+  overlay, so the moment a newer revision arrives the question is settled: the mark either
+  becomes real or is taken back with an explanation. A move that is never acknowledged at all is
+  withdrawn after five seconds — silence is not confirmation.
+- Chat items still appear only after the authoritative server broadcasts them. Only moves are
+  optimistic, because only moves are worth the round trip.
 - Selected JPEG, PNG, or WebP images are decoded, resized to at most 1600 px, compressed to WebP, capped at 1.5 MB, and Base64-encoded inside the authenticated WebSocket JSON protocol. No upload service or permanent URL is created.
 - Received image bytes become temporary Blob URLs. Every URL is revoked when history is pruned, the room ends, the session becomes invalid, or the component unmounts.
 

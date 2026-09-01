@@ -159,13 +159,27 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 5 — Optimistic UI with rollback
 
-- [ ] **P5-01** Speculative local move application, visually distinct from confirmed state.
-- [ ] **P5-02** Reconciliation against the authoritative revision; speculative state is always
-      subordinate.
-- [ ] **P5-03** Graceful rollback with an explanation on rejection — the rejected mark must never
-      remain visible.
-- [ ] **P5-04** Guarantee INV-2 (no client ever displays a server-rejected move) under chaos.
-- [ ] **P5-05** Guarantee INV-1 (both players never simultaneously believe it is their turn).
+- [x] **P5-01** `app/lib/speculation.ts` holds the rules as pure functions; the board renders
+      `projectBoard(snapshot.board, speculation)`. An unconfirmed mark is legible but lighter,
+      with a slow breath and an underline — deliberately not ghostly, since the player made a
+      real decision that will almost always stand. Its `aria-label` says "sending".
+- [x] **P5-02** `reconcile()` asks what the newer board *shows*, not how far the revision moved,
+      because a move and the opponent's reply can arrive together. The overlay never covers a
+      square the server has already filled — the authority wins on the spot rather than waiting.
+- [x] **P5-03** One function, `settleSpeculation`, is the only path by which an optimistic mark
+      disappears, so INV-2 is a statement about it. Rollback carries the server's own reason where
+      there is one. Every failure path is covered: explicit rejection, a newer board without our
+      mark, losing the window's control, and silence — an unacknowledged move is withdrawn after
+      five seconds, because silence is not confirmation.
+- [x] **P5-04** The chaos simulation now speculates using the real functions, and **INV-2 is
+      measured against the visible board rather than the snapshot** — checking the snapshot alone
+      would have made the invariant vacuous the moment speculation existed, since the snapshot is
+      server-supplied by construction. 200 seeded runs at 800ms ±400ms, no violations, and
+      nothing optimistic survives the drain.
+- [x] **P5-05** `canPlay()` gates acting, and an outstanding speculation blocks a second move —
+      without that a player could place two marks against a board the server has not seen.
+      Asserted exhaustively over every turn/phase combination, in the chaos runs, and in a real
+      browser.
 
 ## Phase 6 — Spectators and capability tokens
 

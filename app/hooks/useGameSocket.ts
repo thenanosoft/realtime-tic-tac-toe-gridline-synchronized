@@ -19,6 +19,7 @@ import {
 import { prepareChatImage, ImagePreparationError } from '../lib/images';
 import { evaluateServerHello } from '../lib/protocolCompatibility';
 import { insertMessage, shouldApplyOverwrite, shouldApplySnapshot } from '../lib/ordering';
+import { reconcile, type Speculation } from '../lib/speculation';
 import { clearSession, loadSession, saveSession, type StoredSession } from '../lib/session';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
@@ -70,7 +71,14 @@ export function useGameSocket() {
   const [timing, setTiming] = useState<RoomTiming | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [lobbyBusy, setLobbyBusy] = useState(false);
-  const [pendingMove, setPendingMove] = useState(false);
+  /**
+   * The move this client is showing but the server has not confirmed.
+   *
+   * Held in state rather than a ref because the board renders from it. It is
+   * cleared the instant the authority speaks - see `settleSpeculation`.
+   */
+  const [speculation, setSpeculation] = useState<Speculation | null>(null);
+
   /**
    * True from the moment a socket reopens with a session to resume until the
    * server confirms it. The snapshot held across a reconnect is stale by
@@ -110,7 +118,8 @@ export function useGameSocket() {
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const stoppedRef = useRef(false);
   const connectRef = useRef<() => void>(() => undefined);
-  const pendingRef = useRef<{ requestId: string; baseRevision: number } | null>(null);
+
+  const speculationRef = useRef<Speculation | null>(null);
   const messageUrlsRef = useRef(new Map<string, string>());
   const typingTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const reactionTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -219,6 +228,21 @@ export function useGameSocket() {
     typingTimersRef.current.set(playerId, timer);
   }, []);
 
+  /**
+   * Removes the overlay and, when the move did not land, says so.
+   *
+   * Kept in one place so there is exactly one path by which a speculative mark
+   * can disappear - INV-2 is a statement about this function.
+   */
+  const settleSpeculation = useCallback((outcome: 'confirmed' | 'rejected', reason?: string) => {
+    if (!speculationRef.current) return;
+    speculationRef.current = null;
+    setSpeculation(null);
+    if (outcome === 'rejected') {
+      setNotice({ tone: 'error', text: reason ?? 'That move did not land. The board has been restored.' });
+    }
+  }, []);
+
   const acceptSnapshot = useCallback((incoming: RoomSnapshot, incomingTiming: RoomTiming) => {
     // Never apply an update that is not strictly newer than what we hold. A
     // reconnect can deliver a resume snapshot and a live broadcast out of order,
@@ -227,20 +251,26 @@ export function useGameSocket() {
     revisionRef.current = { roomCode: incoming.roomCode, revision: incoming.revision };
     setSnapshot(incoming);
     setTiming(incomingTiming);
-    const pending = pendingRef.current;
-    if (pending && incoming.revision > pending.baseRevision) {
-      pendingRef.current = null;
-      setPendingMove(false);
+
+    // The authority has spoken: the overlay is resolved before anything renders,
+    // so a rejected mark is never painted alongside a newer board.
+    const outstanding = speculationRef.current;
+    if (outstanding) {
+      const verdict = reconcile(outstanding, incoming);
+      if (verdict === 'confirmed') settleSpeculation('confirmed');
+      else if (verdict === 'rejected') {
+        settleSpeculation('rejected', 'That square was taken first. The board has been restored.');
+      }
     }
-  }, []);
+  }, [settleSpeculation]);
 
   const endLocalSession = useCallback((message: string, tone: Notice['tone'] = 'info') => {
     clearSession();
     sessionRef.current = null;
     revisionRef.current = null;
-    pendingRef.current = null;
-    setPendingMove(false);
     setLobbyBusy(false);
+    speculationRef.current = null;
+    setSpeculation(null);
     setSession(null);
     setSnapshot(null);
     setTiming(null);
@@ -278,10 +308,6 @@ export function useGameSocket() {
       }
       case 'game.snapshot':
         acceptSnapshot(message.snapshot, message.timing);
-        if (message.ackRequestId && pendingRef.current?.requestId === message.ackRequestId) {
-          pendingRef.current = null;
-          setPendingMove(false);
-        }
         return;
       case 'session.control':
         setHasControl(message.hasControl);
@@ -290,8 +316,9 @@ export function useGameSocket() {
         // never be acknowledged now, so release the board rather than leaving it
         // stuck behind a pending command.
         if (!message.hasControl) {
-          pendingRef.current = null;
-          setPendingMove(false);
+          // A window that no longer holds the slot must not keep showing a mark
+          // it can never get confirmed.
+          settleSpeculation('rejected', 'Another window took control before that move landed.');
         }
         return;
       case 'chat.message':
@@ -324,18 +351,23 @@ export function useGameSocket() {
         reactionTimersRef.current.set(message.id, timer);
         return;
       }
-      case 'command.rejected':
-        if (!message.requestId || pendingRef.current?.requestId === message.requestId) {
-          pendingRef.current = null;
-          setPendingMove(false);
-        }
+      case 'command.rejected': {
         setLobbyBusy(false);
-        setNotice({ tone: 'error', text: message.message });
         setResyncing(false);
+        // A rejection of the speculative move rolls it back and carries the
+        // server's own reason, which is more useful than a generic one. Routed
+        // through settleSpeculation so the notice is not raised twice.
+        const outstanding = speculationRef.current;
+        if (outstanding && message.requestId === outstanding.requestId) {
+          settleSpeculation('rejected', message.message);
+        } else {
+          setNotice({ tone: 'error', text: message.message });
+        }
         if ((message.code === 'INVALID_SESSION' || message.code === 'ROOM_NOT_FOUND') && sessionRef.current) {
           endLocalSession(message.message, 'error');
         }
         return;
+      }
       case 'session.ended':
         endLocalSession(message.message);
         return;
@@ -360,7 +392,7 @@ export function useGameSocket() {
       case 'presence.pong':
         return;
     }
-  }, [acceptSnapshot, appendChatMessage, endLocalSession, replaceChat, updateTyping]);
+  }, [acceptSnapshot, appendChatMessage, endLocalSession, replaceChat, settleSpeculation, updateTyping]);
 
   useEffect(() => {
     stoppedRef.current = false;
@@ -433,8 +465,11 @@ export function useGameSocket() {
           return;
         }
         setConnection('reconnecting');
-        pendingRef.current = null;
-        setPendingMove(false);
+        // The speculative mark is deliberately left standing across a drop. The
+        // move may well have reached the server, and the resume snapshot will
+        // settle it correctly either way; clearing it here would flicker a mark
+        // off and straight back on for every brief reconnect. If the socket
+        // never comes back, the five-second timeout takes it off.
         const delay = Math.min(8_000, 500 * 2 ** reconnectAttemptRef.current) + Math.random() * 250;
         reconnectAttemptRef.current += 1;
         reconnectTimerRef.current = setTimeout(() => connectRef.current(), delay);
@@ -511,20 +546,35 @@ export function useGameSocket() {
   }, [send]);
 
   const move = useCallback((cell: number) => {
-    if (!snapshot || pendingRef.current) return;
+    if (!snapshot || speculationRef.current) return;
+    // The mark comes from the snapshot, not the stored session: a rematch swaps
+    // marks without reissuing session.ready, so the stored one goes stale.
+    const mark = snapshot.players.find((player) => player.id === sessionRef.current?.playerId)?.mark;
+    if (!mark) return;
+
     const id = requestId();
-    if (send({ type: 'game.move', requestId: id, cell, expectedRevision: snapshot.revision })) {
-      pendingRef.current = { requestId: id, baseRevision: snapshot.revision };
-      setPendingMove(true);
-      setTimeout(() => {
-        if (pendingRef.current?.requestId === id) {
-          pendingRef.current = null;
-          setPendingMove(false);
-          setNotice({ tone: 'error', text: 'The server did not confirm that move. The board was not changed.' });
-        }
-      }, 5_000);
-    }
-  }, [send, snapshot]);
+    // Sent before anything is shown. `send` is synchronous, so this costs no
+    // perceptible time, and it means a failed send never leaves a mark on the
+    // board with nothing in flight to resolve it.
+    if (!send({ type: 'game.move', requestId: id, cell, expectedRevision: snapshot.revision })) return;
+
+    const optimistic: Speculation = {
+      requestId: id,
+      roomCode: snapshot.roomCode,
+      cell,
+      mark,
+      baseRevision: snapshot.revision,
+    };
+    speculationRef.current = optimistic;
+    setSpeculation(optimistic);
+    // If the server never answers at all - a dropped frame, a dead socket - the
+    // overlay must still come off. Silence is not confirmation.
+    setTimeout(() => {
+      if (speculationRef.current?.requestId === id) {
+        settleSpeculation('rejected', 'The server did not confirm that move. The board has been restored.');
+      }
+    }, 5_000);
+  }, [send, settleSpeculation, snapshot]);
 
   const voteRematch = useCallback(() => {
     send({ type: 'rematch.vote', requestId: requestId() });
@@ -588,13 +638,13 @@ export function useGameSocket() {
     session,
     snapshot,
     timing,
+    speculation,
     resyncing,
     hasControl,
     controlReason,
     claimControl,
     notice,
     lobbyBusy,
-    pendingMove,
     chatMessages,
     typingPlayerId,
     quickReactions,

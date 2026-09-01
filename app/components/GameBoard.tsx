@@ -3,16 +3,23 @@
 import type { KeyboardEvent } from 'react';
 import type { Mark } from '../../shared/game';
 import type { RoomSnapshot } from '../../shared/protocol';
+import { projectBoard, type Speculation } from '../lib/speculation';
 
 interface GameBoardProps {
   snapshot: RoomSnapshot;
   myMark: Mark;
   interactive: boolean;
+  /** A move this client has sent but the server has not yet confirmed. */
+  speculation: Speculation | null;
   onMove(cell: number): void;
 }
 
-export function GameBoard({ snapshot, myMark, interactive, onMove }: GameBoardProps) {
+export function GameBoard({ snapshot, myMark, interactive, speculation, onMove }: GameBoardProps) {
   const winningKey = snapshot.winningLine?.join('-');
+  // The authoritative board with the pending cell overlaid. Rendering from the
+  // projection rather than mutating anything keeps the snapshot the single
+  // source of truth: drop the overlay and the real board is still underneath.
+  const board = projectBoard(snapshot.board, speculation);
 
   const handleKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
@@ -34,9 +41,10 @@ export function GameBoard({ snapshot, myMark, interactive, onMove }: GameBoardPr
 
   return (
     <div className={`game-board preview-${myMark.toLowerCase()} ${interactive ? 'is-interactive' : ''} ${snapshot.winner ? 'has-winner' : ''}`} role="grid" aria-label="Tic-Tac-Toe board">
-      {snapshot.board.map((mark, index) => {
+      {board.map((mark, index) => {
         const winning = snapshot.winningLine?.includes(index);
         const dimmed = Boolean(snapshot.winningLine && !winning);
+        const unconfirmed = speculation?.cell === index && snapshot.board[index] === null;
         const row = Math.floor(index / 3) + 1;
         const column = index % 3 + 1;
         return (
@@ -45,11 +53,17 @@ export function GameBoard({ snapshot, myMark, interactive, onMove }: GameBoardPr
             type="button"
             role="gridcell"
             data-cell={index}
-            className={`game-cell ${mark ? `filled mark-${mark.toLowerCase()}` : ''} ${winning ? 'winning' : ''} ${dimmed ? 'dimmed' : ''}`}
+            className={`game-cell ${mark ? `filled mark-${mark.toLowerCase()}` : ''} ${winning ? 'winning' : ''} ${dimmed ? 'dimmed' : ''} ${unconfirmed ? 'unconfirmed' : ''}`}
             disabled={!interactive || Boolean(mark)}
             onClick={() => onMove(index)}
             onKeyDown={(event) => handleKey(event, index)}
-            aria-label={mark ? `Row ${row}, column ${column}: ${mark}` : `Row ${row}, column ${column}: empty${interactive ? `. Place ${myMark}` : ''}`}
+            aria-label={
+              unconfirmed
+                ? `Row ${row}, column ${column}: ${mark}, sending`
+                : mark
+                  ? `Row ${row}, column ${column}: ${mark}`
+                  : `Row ${row}, column ${column}: empty${interactive ? `. Place ${myMark}` : ''}`
+            }
           >
             {mark === 'X' && <span className="drawn-x" aria-hidden="true"><i /><i /></span>}
             {mark === 'O' && <span className="drawn-o" aria-hidden="true" />}

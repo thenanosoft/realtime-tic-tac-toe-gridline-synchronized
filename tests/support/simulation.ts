@@ -4,6 +4,7 @@ import { createRandom, decide, type ChaosProfile } from '../../shared/chaos';
 import { PROTOCOL_VERSION, type ClientMessage, type RoomSnapshot, type ServerMessage } from '../../shared/protocol';
 import type { Mark } from '../../shared/game';
 import { shouldApplySnapshot, type RevisionCursor } from '../../app/lib/ordering';
+import { canPlay, projectBoard, reconcile, type Speculation } from '../../app/lib/speculation';
 
 /**
  * Headless, deterministic chaos simulation.
@@ -62,6 +63,8 @@ class SimulatedClient {
   live = true;
   /** Mirrors the hook's `resyncing`: a snapshot held across a reconnect is stale. */
   resyncing = false;
+  /** The optimistic mark this client shows before the server has confirmed it. */
+  speculation: Speculation | null = null;
   readonly appliedRevisions: number[] = [];
 
   constructor(readonly name: string) {
@@ -74,12 +77,21 @@ class SimulatedClient {
    * phase, the authoritative turn is ours, and nothing of ours is in flight.
    */
   canMove(): boolean {
-    return this.live
-      && !this.resyncing
-      && this.snapshot !== null
-      && this.snapshot.phase === 'active'
-      && this.snapshot.turn === this.mark
-      && this.pendingRequestId === null;
+    // The real gate, imported rather than restated.
+    return this.live && canPlay({
+      connected: true,
+      resyncing: this.resyncing,
+      hasControl: true,
+      snapshot: this.snapshot,
+      mark: this.mark ?? undefined,
+      speculation: this.speculation,
+    });
+  }
+
+  /** What this client actually shows: the board plus any pending overlay. */
+  visibleBoard(): Array<Mark | null> {
+    if (!this.snapshot) return Array(9).fill(null);
+    return projectBoard(this.snapshot.board, this.speculation);
   }
 }
 
@@ -140,13 +152,27 @@ export async function runChaosMatch(options: SimulationOptions): Promise<Simulat
       if (client.snapshot.players.length > 2) {
         record('INV-6', client.name + ' saw ' + client.snapshot.players.length + ' players');
       }
-      // INV-2: nothing a client shows may contradict the server. Scoped to the
-      // round, since a rematch clears the board and an older snapshot from the
-      // previous round is stale, not wrong.
+      // INV-2, now measured against what the player can actually see - the
+      // authoritative board *plus* any optimistic overlay. Checking the snapshot
+      // alone would have made this invariant vacuous the moment speculation was
+      // introduced, since the snapshot is server-supplied by construction.
+      //
+      // Scoped to the round: a rematch clears the board, so an older snapshot
+      // from the previous round is stale rather than wrong.
       if (server && server.round === client.snapshot.round) {
-        client.snapshot.board.forEach((cell, index) => {
-          if (cell !== null && server.board[index] !== cell) {
+        const visible = client.visibleBoard();
+        const inFlight = client.speculation?.cell ?? -1;
+        visible.forEach((cell, index) => {
+          if (cell === null) return;
+          if (server.board[index] !== null && server.board[index] !== cell) {
+            // An outright contradiction: two different marks in one square.
             record('INV-2', client.name + ' showed ' + cell + ' at ' + index + ', server has ' + server.board[index]);
+            return;
+          }
+          if (server.board[index] === null && index !== inFlight) {
+            // A mark the server does not have and this client is not currently
+            // waiting on - i.e. one that was rejected and never cleaned up.
+            record('INV-2', client.name + ' still showed an unbacked ' + cell + ' at ' + index);
           }
         });
       }
@@ -155,6 +181,14 @@ export async function runChaosMatch(options: SimulationOptions): Promise<Simulat
 
   const applySnapshot = (client: SimulatedClient, incoming: RoomSnapshot) => {
     if (!shouldApplySnapshot(client.cursor, incoming)) return;
+
+    // The overlay resolves against the authority before anything else reads the
+    // board, so a rejected mark is never observable alongside a newer snapshot.
+    if (client.speculation) {
+      const verdict = reconcile(client.speculation, incoming);
+      if (verdict !== 'pending') client.speculation = null;
+    }
+
     const previous = client.cursor;
     if (previous && previous.roomCode === incoming.roomCode && incoming.revision <= previous.revision) {
       record('INV-4', client.name + ' applied revision ' + incoming.revision + ' after ' + previous.revision);
@@ -173,6 +207,7 @@ export async function runChaosMatch(options: SimulationOptions): Promise<Simulat
         client.mark = message.mark;
         client.pendingRequestId = null;
         client.resyncing = false;
+        client.speculation = null;
         applySnapshot(client, message.snapshot);
         break;
       case 'game.snapshot':
@@ -182,6 +217,9 @@ export async function runChaosMatch(options: SimulationOptions): Promise<Simulat
       case 'command.rejected':
         rejections[message.code] = (rejections[message.code] ?? 0) + 1;
         client.resyncing = false;
+        if (client.speculation && message.requestId === client.speculation.requestId) {
+          client.speculation = null;
+        }
         if (!message.requestId || client.pendingRequestId === message.requestId) client.pendingRequestId = null;
         break;
       case 'session.ended':
@@ -239,10 +277,23 @@ export async function runChaosMatch(options: SimulationOptions): Promise<Simulat
     const cell = empty[Math.floor(random() * empty.length) % empty.length];
     const requestId = nextRequestId();
     client.pendingRequestId = requestId;
+    // Shown immediately, exactly as the browser does.
+    if (client.mark) {
+      client.speculation = {
+        requestId,
+        roomCode: client.snapshot.roomCode,
+        cell,
+        mark: client.mark,
+        baseRevision: client.snapshot.revision,
+      };
+    }
     // The browser gives up on an unacknowledged move after 5s and unblocks the
     // board. Without the same escape hatch a dropped frame would deadlock the run.
     setTimeout(() => {
       if (client.pendingRequestId === requestId) client.pendingRequestId = null;
+      // Silence is not confirmation: the overlay must come off even when the
+      // server never answers at all.
+      if (client.speculation?.requestId === requestId) client.speculation = null;
     }, 5_000);
     submit(client, {
       type: 'game.move',
@@ -323,6 +374,15 @@ export async function runChaosMatch(options: SimulationOptions): Promise<Simulat
           'INV-3',
           client.name + ' did not converge: revision ' + client.snapshot.revision + ' vs server ' + server.revision,
         );
+      }
+      // And nothing optimistic may still be on screen once the network is quiet.
+      // A speculation surviving the drain means a move was never resolved either
+      // way, which is precisely the state INV-2 forbids.
+      if (client.speculation) {
+        record('INV-2', client.name + ' still held an unresolved optimistic move after the network settled');
+      }
+      if (JSON.stringify(client.visibleBoard()) !== JSON.stringify(server.board)) {
+        record('INV-2', client.name + ' showed a board the server does not have after settling');
       }
     }
   }
