@@ -236,15 +236,38 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 8 — End-to-end encryption and invitations
 
-- [ ] **P8-01** Client-side room secret generation; secret lives only in the URL fragment.
-- [ ] **P8-02** Verify the fragment is never transmitted — not in the WebSocket handshake, not
-      in any frame, not in any header.
-- [ ] **P8-03** AES-GCM E2EE for chat text with per-message IVs.
-- [ ] **P8-04** E2EE for images, layered over the Phase 7 chunked transport.
-- [ ] **P8-05** Key rotation on rematch and on session phase change; old keys destroyed.
-- [ ] **P8-06** Test: post-rotation keys cannot decrypt pre-rotation ciphertext.
-- [ ] **P8-07** Web Share API invite with clipboard fallback, fragment preserved intact.
-- [ ] **P8-08** Locally generated QR invite — no external QR service, ever.
+- [x] **P8-01** 32 random bytes, generated in the browser before the room exists and placed in
+      the URL **fragment**. A fragment is stripped before the request leaves the machine; a query
+      string is not. The old invite link used `?room=` — correct for a code, fatal for a key.
+- [x] **P8-02** Asserted by transcript, not by inspection: the socket tests keep every frame the
+      server received and search it for the plaintext and for the secret. That is the only form of
+      this claim a patched client cannot talk its way out of.
+- [x] **P8-03** AES-GCM, 256-bit, with a fresh 96-bit IV per message. Keys come from
+      HKDF-SHA256 over the room secret, salted with the room code and labelled with the epoch, and
+      are derived **non-extractable** so not even our own code can read them back out.
+- [x] **P8-04** Sealed before chunking rather than per chunk: one authentication tag over the
+      whole image means a truncated or reordered upload fails to open instead of decrypting into a
+      partial picture. The consequence is that the server can no longer sniff the format, so
+      `inspectImage` moved to `shared/` and now runs on the receiving client after decryption —
+      the check did not get weaker, it moved to the only party still able to perform it.
+- [x] **P8-05** The epoch increments when a player arrives and on every rematch. Nothing is
+      exchanged: both sides derive generation *n* from the secret they already hold, so the server
+      names the generation without ever being able to compute a key. Exactly one generation is held
+      client-side, so deriving the next destroys the previous (D-010).
+- [x] **P8-06** Tested both ways — the new key cannot open the old ciphertext *and* the old key
+      still can, which is what makes the first assertion about rotation rather than about a broken
+      derivation. Also tested across rooms: the same secret in a different room derives a different
+      key, so an invite link pasted into the wrong room fails loudly.
+- [x] **P8-07** Share sheet, then clipboard, then the link on screen as the floor. A dismissed
+      share sheet rejects exactly like a failure and must not be reported as one, so both fall
+      through to the clipboard — and the link stays visible because a share target that re-encodes
+      a URL is precisely how a fragment gets lost.
+- [x] **P8-08** A QR encoder written in-repo (`app/lib/qr.ts`): byte mode, EC level M, versions
+      1–10, with the specification's four penalty rules used to pick the mask. Every hosted
+      generator works by being *sent* the thing to encode, which for this URL means handing over
+      the room key — the one piece of this phase that looked like a UI detail was the piece that
+      would have undone the rest. Tested by decoding the symbol back with an independent reader at
+      every supported version.
 
 ## Phase 9 — Match features
 

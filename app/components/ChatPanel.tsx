@@ -26,7 +26,9 @@ interface ChatPanelProps {
   typingPlayerId: string | null;
   imagePreparing: boolean;
   onClose(): void;
-  onSendText(text: string): boolean;
+  onSendText(text: string): Promise<boolean>;
+  /** Whether bodies in this room are sealed before they leave the browser. */
+  encrypted: boolean;
   onTyping(typing: boolean): void;
   onSticker(stickerId: StickerId): boolean;
   onQuickReaction(reaction: QuickReaction): boolean;
@@ -45,6 +47,7 @@ export function ChatPanel({
   imagePreparing,
   onClose,
   onSendText,
+  encrypted,
   onTyping,
   onSticker,
   onQuickReaction,
@@ -62,6 +65,7 @@ export function ChatPanel({
   const scrollRef = useRef<HTMLDivElement>(null);
   const nearBottomRef = useRef(true);
   const typingRef = useRef(false);
+  const sendingRef = useRef(false);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const previousLastIdRef = useRef<string | null>(null);
 
@@ -150,13 +154,21 @@ export function ChatPanel({
     typingTimerRef.current = setTimeout(stopTyping, 1_300);
   };
 
-  const submit = (event: FormEvent) => {
+  const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!text.trim() || !canChat) return;
-    if (onSendText(text)) {
-      setText('');
-      stopTyping();
-      setPicker(null);
+    if (!text.trim() || !canChat || sendingRef.current) return;
+    // Sealing a message is asynchronous, so a second Enter before the first
+    // send resolves would post the same text twice. The guard is here rather
+    // than on the button because the keyboard path does not go through it.
+    sendingRef.current = true;
+    try {
+      if (await onSendText(text)) {
+        setText('');
+        stopTyping();
+        setPicker(null);
+      }
+    } finally {
+      sendingRef.current = false;
     }
   };
 
@@ -197,7 +209,12 @@ export function ChatPanel({
           </div>
           <button onClick={onClose} aria-label="Close private chat">×</button>
         </header>
-        <p className="chat-privacy"><span aria-hidden="true">⌁</span> Messages and images disappear when this session ends.</p>
+        <p className="chat-privacy">
+          <span aria-hidden="true">⌁</span>
+          {encrypted
+            ? 'Encrypted in this browser. The server routes these messages without being able to read them.'
+            : 'Messages and images disappear when this session ends.'}
+        </p>
 
         <div
           className="chat-messages"
@@ -222,9 +239,18 @@ export function ChatPanel({
               <article className={`chat-message ${mine ? 'is-mine' : 'is-theirs'} kind-${message.kind}`} key={message.id}>
                 <div className="chat-message-meta"><strong>{mine ? 'You' : sender}</strong><time>{formatTimestamp(message.createdAt)}</time></div>
                 <div className="chat-bubble">
-                  {message.kind === 'text' && <p>{message.text}</p>}
+                  {message.undecryptable && (
+                    // Shown rather than hidden. Dropping it would leave a hole
+                    // in the transcript and a player who cannot tell whether
+                    // anything was said at all.
+                    <p className="chat-sealed">
+                      <span aria-hidden="true">⌁</span>
+                      Sealed with a key this window does not hold.
+                    </p>
+                  )}
+                  {!message.undecryptable && message.kind === 'text' && <p>{message.text}</p>}
                   {message.kind === 'sticker' && <StickerArt stickerId={message.stickerId} large />}
-                  {message.kind === 'image' && (
+                  {!message.undecryptable && message.kind === 'image' && (
                     <button className="chat-image" onClick={() => setPreview(message)} aria-label={`Preview image shared by ${mine ? 'you' : sender}`}>
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img src={message.objectUrl} alt={`Shared image from ${mine ? 'you' : sender}`} width={message.width} height={message.height} />

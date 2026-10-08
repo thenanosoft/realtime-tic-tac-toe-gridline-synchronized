@@ -242,3 +242,47 @@ open handler rather than through the `send` helper, so it was the one command th
 That is now structurally impossible: a single `encode()` is the only place an outbound frame is
 serialised, and both paths go through it. The lesson is worth keeping — the bug was not the
 version bump, it was having two places that stamped independently.
+
+## D-010 — Key rotation discards the transcript it can no longer read · **DECIDED** · 2026-10-08
+
+**Context.** Phase 8 rotates the room key when a player joins and on every rematch, and each
+client holds exactly one generation — deriving the next overwrites the previous `CryptoKey`,
+which is what makes rotation more than a label. That leaves the question of what happens to the
+messages the retired key sealed.
+
+**Options.**
+
+1. Keep a ring of recent keys so old messages stay readable. This is the comfortable choice and
+   it quietly cancels the phase: a key kept for convenience is a key available to be stolen, and
+   "old keys destroyed" becomes "old keys retained, briefly".
+2. Keep the ciphertext and let it render as unreadable blocks. Honest about the cryptography and
+   useless as a product: the server would hold attachment budget for a conversation nobody can
+   read, and the player would see a transcript of blanks with no explanation.
+3. Rotate and drop. The server clears the room's chat and announces the ids via `chat.expired`,
+   so each client releases the blob URLs it holds for them.
+
+**Decision.** Option 3. The two things that must not happen are a key outliving its generation
+and a player being shown something they cannot read without being told why. Dropping the
+transcript satisfies both, and it is consistent with what the room already claims to be: chat
+that exists for this conversation and not beyond it.
+
+**Consequence.** A rematch starts a fresh conversation as well as a fresh board. This is a
+visible product change, not only an internal one, and it applies *only* to encrypted rooms —
+there is nothing to rotate in a plain one, so a rematch must not eat the chat there. That
+asymmetry is asserted by its own test, because it is exactly the kind of thing a later refactor
+would flatten into "always clear on rematch".
+
+## D-011 — Spectators are not given room keys · **DECIDED** · 2026-10-08
+
+**Context.** Phase 6 lets a host open chat to spectators. Phase 8 encrypts chat. The two features
+read as though they contradict each other.
+
+**Decision.** They do not, and the resolution is to change nothing. A spectator joins by room
+code, which carries no key, so an encrypted room's chat is unreadable to them whether or not the
+host opened it. The host-facing switch keeps its exact meaning — *send* chat to watchers — and the
+encryption decides whether sending it discloses anything.
+
+**Consequence.** Opening chat to spectators in an encrypted room delivers ciphertext they cannot
+open, and the panel tells them so rather than showing blanks. The privacy guarantee therefore does
+not depend on the host understanding the interaction between two features, which is the sort of
+dependency that eventually produces a leak.

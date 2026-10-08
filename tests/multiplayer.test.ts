@@ -236,7 +236,16 @@ describe('real WebSocket multiplayer authority', () => {
     outsider.send({ type: 'chat.message', requestId: 'other-room-attempt', text: 'not allowed' });
     expect((await outsider.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'other-room-attempt')).code).toBe('NOT_IN_ROOM');
 
-    o.sendRaw(JSON.stringify({ type: 'chat.message', requestId: 'oversized-text', text: 'x'.repeat(MAX_CHAT_TEXT_LENGTH + 1) }));
+    // Stamped, so the frame reaches the room rather than being turned away at
+    // the version check. The schema now allows a longer body because a sealed
+    // one is longer than its plaintext, which makes the plaintext ceiling an
+    // explicit server-side check rather than a side effect of the schema.
+    o.sendRaw(JSON.stringify({
+      type: 'chat.message',
+      requestId: 'oversized-text',
+      text: 'x'.repeat(MAX_CHAT_TEXT_LENGTH + 1),
+      protocolVersion: PROTOCOL_VERSION,
+    }));
     expect((await o.waitFor((message): message is Extract<ServerMessage, { type: 'command.rejected' }> => message.type === 'command.rejected' && message.requestId === 'oversized-text')).code).toBe('MESSAGE_TOO_LONG');
   });
 

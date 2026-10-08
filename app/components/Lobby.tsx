@@ -8,13 +8,16 @@ interface LobbyProps {
   busy: boolean;
   /** Set when a join was refused because the room already has two players. */
   fullRoomCode: string | null;
-  onCreate(): void;
+  onCreate(options?: { encrypted?: boolean }): void;
   onJoin(code: string): void;
   onSpectate(code: string): void;
 }
 
 export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpectate }: LobbyProps) {
   const [code, setCode] = useState('');
+  // On by default. A room that is private only when you remember to ask is a
+  // room that is usually not private.
+  const [encrypted, setEncrypted] = useState(true);
   const unavailable = connection !== 'connected' || busy;
 
   useEffect(() => {
@@ -38,9 +41,24 @@ export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpec
 
         <div className="lobby-card">
           <div className="identity-note"><span aria-hidden="true">✦</span><div><small>TEMPORARY IDENTITY</small><strong>A friendly player name is assigned when you enter.</strong></div></div>
-          <button className="primary-action" onClick={onCreate} disabled={unavailable}>
+          <button className="primary-action" onClick={() => onCreate({ encrypted })} disabled={unavailable}>
             <span>{busy ? 'Opening your room…' : 'Open a private room'}</span><b aria-hidden="true">↗</b>
           </button>
+          <label className="encryption-choice">
+            <input
+              type="checkbox"
+              checked={encrypted}
+              onChange={(event) => setEncrypted(event.target.checked)}
+              disabled={unavailable}
+            />
+            <span>
+              <strong>Encrypt the conversation</strong>
+              <small>
+                The key is generated here and travels only in the invitation link. Chat and images are sealed
+                before they leave this browser, so the server relays what it cannot read.
+              </small>
+            </span>
+          </label>
           <div className="divider"><span>OR ENTER A ROOM</span></div>
           <form className="join-row" onSubmit={submitJoin}>
             <label>

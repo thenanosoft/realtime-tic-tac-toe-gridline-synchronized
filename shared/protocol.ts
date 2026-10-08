@@ -21,13 +21,17 @@ import type { Cell, Mark } from './game';
  *     cancellation, and attachment memory is budgeted per room and per process.
  *     Adds `chat.image.begin`, `chat.image.chunk`, `chat.image.cancel` and
  *     `upload.progress`.
+ * 6 - chat bodies may arrive sealed. A `sealed` envelope carries the AES-GCM IV
+ *     and the key generation; when it is present the `text` or image `data` is
+ *     ciphertext the server cannot read, and the snapshot says which generation
+ *     is current. Adds `room.create.encrypted`.
  *
  * GitHub Pages and Render deploy independently, so a version skew window always
  * exists. The server therefore keeps accepting MIN_SUPPORTED_CLIENT_PROTOCOL for
  * one release cycle rather than cutting old clients off mid-match, and clients
  * compare against `server.hello` to tell the player to refresh.
  */
-export const PROTOCOL_VERSION = 5;
+export const PROTOCOL_VERSION = 6;
 /**
  * Raised to 2 in this release, deliberately.
  *
@@ -38,7 +42,7 @@ export const PROTOCOL_VERSION = 5;
  * honest behaviour. A v2 client, by contrast, is still fully served: every v2
  * command remains valid in v3.
  */
-export const MIN_SUPPORTED_CLIENT_PROTOCOL = 4;
+export const MIN_SUPPORTED_CLIENT_PROTOCOL = 5;
 export const LEGACY_CLIENT_PROTOCOL = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
@@ -66,6 +70,14 @@ export const UPLOAD_IDLE_TIMEOUT_MS = 20_000;
  * the host turns it on.
  */
 export const CONTENT_EXPIRY_MS = 5 * 60_000;
+/**
+ * Ciphertext is longer than its plaintext: AES-GCM adds a 16-byte tag, and
+ * base64 adds a third again on top. A sealed body therefore needs its own
+ * ceiling. The plaintext bound is applied by the sender before sealing and
+ * re-checked by the server for unsealed messages only - the server cannot
+ * measure the length of something it cannot read.
+ */
+export const MAX_SEALED_TEXT_LENGTH = 6_000;
 export const SUPPORTED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 export const STICKER_IDS = ['handshake', 'fire', 'laugh', 'mind-blown', 'bullseye', 'sparkles'] as const;
 export const QUICK_REACTIONS = ['😂', '🔥', '👏', '😮', '💀', '❤️', '🎯', '🤝'] as const;
@@ -84,8 +96,26 @@ const encodedImageLimit = Math.ceil(MAX_CHAT_IMAGE_BYTES / 3) * 4 + 4;
 // as LEGACY_CLIENT_PROTOCOL, never as "trusted".
 const envelope = { protocolVersion: z.number().int().min(1).max(1_000).optional() };
 
+/**
+ * What the server is told about a sealed body, which is everything except how
+ * to read it.
+ *
+ * The IV must be unique per message under a given key, so it is generated fresh
+ * for every seal and travels in the clear - that is what an IV is for. `epoch`
+ * names the key generation, so a client that has rotated can say that a message
+ * predates its current key instead of failing to decrypt it and guessing why.
+ */
+const sealedSchema = z.object({
+  iv: z.string().min(16).max(24),
+  epoch: z.number().int().min(0).max(100_000),
+}).strict();
+
 export const clientMessageSchema = z.discriminatedUnion('type', [
-  z.object({ type: z.literal('room.create'), requestId, ...envelope }).strict(),
+  // `encrypted` is a declaration, not a key exchange. The server records that
+  // bodies in this room are ciphertext and which generation is current; the key
+  // itself is derived on each client from a secret that exists only in the URL
+  // fragment (P8-01).
+  z.object({ type: z.literal('room.create'), requestId, encrypted: z.boolean().optional(), ...envelope }).strict(),
   z.object({ type: z.literal('room.join'), requestId, roomCode, ...envelope }).strict(),
   z.object({ type: z.literal('room.leave'), requestId, ...envelope }).strict(),
   z.object({
@@ -119,6 +149,7 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
     height: z.number().int().min(1).max(MAX_CHAT_IMAGE_DIMENSION),
     byteLength: z.number().int().min(1).max(MAX_CHAT_IMAGE_BYTES),
     chunks: z.number().int().min(1).max(2_000),
+    sealed: sealedSchema.optional(),
     ...envelope,
   }).strict(),
   z.object({
@@ -129,7 +160,13 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
     ...envelope,
   }).strict(),
   z.object({ type: z.literal('chat.image.cancel'), uploadId: z.string().uuid(), ...envelope }).strict(),
-  z.object({ type: z.literal('chat.message'), requestId, text: z.string().min(1).max(MAX_CHAT_TEXT_LENGTH), ...envelope }).strict(),
+  z.object({
+    type: z.literal('chat.message'),
+    requestId,
+    text: z.string().min(1).max(MAX_SEALED_TEXT_LENGTH),
+    sealed: sealedSchema.optional(),
+    ...envelope,
+  }).strict(),
   z.object({ type: z.literal('chat.typing'), typing: z.boolean(), ...envelope }).strict(),
   z.object({ type: z.literal('chat.quick-reaction'), requestId, reaction: z.enum(QUICK_REACTIONS), ...envelope }).strict(),
   z.object({
@@ -241,6 +278,29 @@ export interface RoomSnapshot {
   contentExpiry: boolean;
   /** Attachment bytes this room currently holds, against its budget. */
   attachmentBytes: number;
+  encryption: RoomEncryption;
+}
+
+/** Travels with a sealed body. The server stores it and forwards it, unread. */
+export interface SealedEnvelope {
+  /** Base64 96-bit AES-GCM nonce, unique to this message. */
+  iv: string;
+  /** Which key generation sealed it. */
+  epoch: number;
+}
+
+/**
+ * Whether this room's chat bodies are ciphertext, and which key generation is
+ * current.
+ *
+ * Note what is absent: there is no key here, and no field from which one could
+ * be derived. The epoch is a label both clients agree on, not a secret - each
+ * derives generation `n` from the room secret it already holds, so rotation
+ * needs no exchange and the server has nothing to leak.
+ */
+export interface RoomEncryption {
+  enabled: boolean;
+  epoch: number;
 }
 
 export interface ChatReactionSnapshot {
@@ -261,10 +321,11 @@ interface ChatMessageBase {
 }
 
 export type ChatMessageSnapshot =
-  | (ChatMessageBase & { kind: 'text'; text: string })
+  | (ChatMessageBase & { kind: 'text'; text: string; sealed?: SealedEnvelope })
   | (ChatMessageBase & { kind: 'sticker'; stickerId: StickerId })
   | (ChatMessageBase & {
       kind: 'image';
+      sealed?: SealedEnvelope;
       mime: SupportedImageMime;
       width: number;
       height: number;
@@ -310,6 +371,8 @@ export type RejectionCode =
   /** The connection lacks the capability this command requires. */
   | 'FORBIDDEN'
   | 'ROOM_NOT_FULL'
+  /** A sealed body was sent to a plain room, or a plain body to a sealed one. */
+  | 'ENCRYPTION_MISMATCH'
   | 'INTERNAL_ERROR';
 
 export type ServerMessage =

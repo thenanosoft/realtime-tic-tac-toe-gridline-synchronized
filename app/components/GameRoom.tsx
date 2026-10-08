@@ -12,6 +12,8 @@ import { GameStatus } from './GameStatus';
 import { Countdown } from './Countdown';
 import { useGameSound } from '../hooks/useGameSound';
 import { ChatPanel } from './ChatPanel';
+import { InvitePanel } from './InvitePanel';
+import type { ShareOutcome } from '../lib/invite';
 
 interface GameRoomProps {
   snapshot: RoomSnapshot;
@@ -34,13 +36,17 @@ interface GameRoomProps {
   typingPlayerId: string | null;
   quickReactions: QuickReactionPopup[];
   imagePreparing: boolean;
-  onSendText(text: string): boolean;
+  onSendText(text: string): Promise<boolean>;
   onTyping(typing: boolean): void;
   onSticker(stickerId: StickerId): boolean;
   onQuickReaction(reaction: QuickReaction): boolean;
   onMessageReaction(messageId: string, reaction: MessageReaction): boolean;
   onImage(file: File): Promise<boolean>;
   onLeave(): void;
+  inviteUrl: string | null;
+  onShareInvite(): Promise<ShareOutcome>;
+  /** A private room whose key this window does not hold. */
+  needsKey: boolean;
 }
 
 export function GameRoom({
@@ -69,8 +75,10 @@ export function GameRoom({
   onMessageReaction,
   onImage,
   onLeave,
+  inviteUrl,
+  onShareInvite,
+  needsKey,
 }: GameRoomProps) {
-  const [copied, setCopied] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [unread, setUnread] = useState(0);
   const previousRef = useRef<RoomSnapshot | null>(null);
@@ -145,26 +153,6 @@ export function GameRoom({
     setUnread(0);
   };
 
-  const copyCode = async () => {
-    const invite = new URL(window.location.href);
-    invite.searchParams.set('room', snapshot.roomCode);
-    const invitation = invite.toString();
-    try {
-      await navigator.clipboard.writeText(invitation);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1_800);
-    } catch {
-      const input = document.createElement('input');
-      input.value = invitation;
-      document.body.appendChild(input);
-      input.select();
-      document.execCommand('copy');
-      input.remove();
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1_800);
-    }
-  };
-
   return (
     <section className={`room-shell scene-${sceneState} ${chatOpen ? 'chat-open' : ''} ${hasControl ? '' : 'is-readonly'}`}>
       {watching && (
@@ -208,12 +196,26 @@ export function GameRoom({
           <button className="claim-control" onClick={onClaimControl}>Take control here</button>
         </div>
       )}
+      {needsKey && (
+        // Said plainly, because the alternative is a chat panel full of blanks
+        // and no explanation for why. The board is unaffected: the game state
+        // was never encrypted, only what the players say to each other.
+        <div className="control-banner key-banner" role="status">
+          <span aria-hidden="true">⌁</span>
+          <p>
+            This is a private room and this window does not hold its key. The match plays normally; the
+            conversation cannot be read here. Open the room from its invitation link to join it properly.
+          </p>
+        </div>
+      )}
       <div className="arena-light light-x" aria-hidden="true" />
       <div className="arena-light light-o" aria-hidden="true" />
       <div className="room-stage">
         <div className="room-heading">
           <div>
-            <span className="room-kicker">PRIVATE SIGNAL · ROUND {String(snapshot.round).padStart(2, '0')}</span>
+              <span className="room-kicker">
+              {snapshot.encryption.enabled ? 'END-TO-END ENCRYPTED' : 'PRIVATE SIGNAL'} · ROUND {String(snapshot.round).padStart(2, '0')}
+            </span>
             <h1>Room <b>{snapshot.roomCode}</b></h1>
           </div>
           <div className="room-actions">
@@ -222,9 +224,12 @@ export function GameRoom({
               <span className="btn-label">Chat</span>
               {unread > 0 && <b aria-label={`${unread} unread messages`}>{unread}</b>}
             </button>}
-            <button className={`copy-room ${copied ? 'copied' : ''}`} onClick={copyCode} aria-label={`Copy invitation link for room ${snapshot.roomCode}`}>
-              <span className="copy-icon" aria-hidden="true" />{copied ? 'Copied' : 'Copy invite'}
-            </button>
+            <InvitePanel
+              roomCode={snapshot.roomCode}
+              inviteUrl={inviteUrl}
+              encrypted={snapshot.encryption.enabled}
+              onShare={onShareInvite}
+            />
             <button
               className="leave-room"
               onClick={() => { if (window.confirm('Leave this room? Your opponent keeps the room and can invite someone else.')) onLeave(); }}
@@ -274,6 +279,7 @@ export function GameRoom({
           imagePreparing={imagePreparing}
           onClose={() => setChatOpen(false)}
           onSendText={onSendText}
+          encrypted={snapshot.encryption.enabled}
           onTyping={onTyping}
           onSticker={onSticker}
           onQuickReaction={onQuickReaction}

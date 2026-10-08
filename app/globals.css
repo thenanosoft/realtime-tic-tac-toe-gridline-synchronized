@@ -1303,3 +1303,73 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
     transition-duration: .01ms !important;
   }
 }
+
+/* --- Invitations and encryption (Phase 8) -------------------------------- */
+
+.invite-panel { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; }
+.invite-actions { display: flex; align-items: center; gap: 8px; }
+
+.qr-toggle {
+  min-width: var(--tap);
+  min-height: var(--tap);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  color: #b6b5af;
+  background: rgba(255, 255, 255, .022);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: .04em;
+  cursor: pointer;
+  transition: color .18s var(--ease-fast), border-color .18s var(--ease-fast), background .18s var(--ease-fast);
+}
+.qr-toggle:hover { color: var(--ink); border-color: var(--line-bright); background: rgba(255, 255, 255, .047); }
+.qr-toggle.is-open { color: var(--signal); border-color: rgba(var(--signal-rgb), .25); background: rgba(var(--signal-rgb), .06); }
+
+.invite-qr {
+  width: min(280px, 72vw);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 13px;
+  border: 1px solid var(--line-faint);
+  border-radius: 14px;
+  background: rgba(10, 12, 16, .88);
+}
+/* The symbol is drawn on white whatever the surrounding theme: a scanner reads
+   contrast, and an inverted QR code is a QR code many cameras refuse. */
+.invite-qr svg { width: 100%; height: auto; border-radius: 6px; background: #ffffff; }
+.invite-qr-failed { margin: 0; color: #b6b5af; font-size: var(--text-2xs); line-height: 1.5; }
+.invite-url { margin: 0; overflow-wrap: anywhere; }
+.invite-url code { color: #b6b5af; font-family: var(--mono, ui-monospace, monospace); font-size: var(--text-2xs); line-height: 1.5; }
+.invite-warning { display: flex; gap: 7px; margin: 0; color: #b6b5af; font-size: var(--text-2xs); line-height: 1.5; }
+.invite-warning > span { color: var(--signal); }
+
+.key-banner { border-color: rgba(var(--signal-rgb), .26); background: rgba(var(--signal-rgb), .05); }
+.key-banner > span { color: var(--signal); }
+
+.chat-sealed { display: flex; gap: 7px; margin: 0; color: #b6b5af; font-size: var(--text-2xs); font-style: italic; line-height: 1.5; }
+.chat-sealed > span { color: var(--signal); font-style: normal; }
+
+.encryption-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: var(--tap);
+  padding: 11px 13px;
+  border: 1px solid var(--line-faint);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, .012);
+  cursor: pointer;
+}
+.encryption-choice input { flex: 0 0 auto; width: 18px; height: 18px; margin-top: 2px; accent-color: var(--signal); }
+.encryption-choice strong { display: block; color: var(--ink); font-size: var(--text-xs); font-weight: 600; }
+.encryption-choice small { display: block; margin-top: 3px; color: #b6b5af; font-size: var(--text-2xs); line-height: 1.5; }
+
+@media (max-width: 720px) {
+  .invite-panel { align-items: stretch; }
+  .invite-qr { width: 100%; }
+}

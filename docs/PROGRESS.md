@@ -622,3 +622,51 @@ client's own reconnect path is the cheaper recovery.
 One design note on testing: the attachment ceilings are injectable. Reaching a real limit is a
 better test than pushing ten megabytes of image data through a socket to prove a rule about
 arithmetic.
+
+---
+
+## 2026-10-08 — Phase 8 closed: the server routes what it cannot read
+
+Branch `phase/8-encryption-and-invites`. **167 unit tests** (up from 140), all gates green.
+Protocol v6. README no longer says E2EE is unimplemented, because it now is.
+
+The whole phase turns on one choice: **there is no key exchange.** Key distribution is where
+E2EE designs fail, so this design does not have any. The room secret is 32 random bytes generated
+in the browser and placed in the invite link fragment; both players derive generation *n* of the
+key from it with HKDF, salted by room code and labelled by epoch. The server names the generation
+and never has the material to compute a key from it.
+
+**The fragment is the mechanism, not a convention.** A fragment is stripped by the browser before
+the request leaves the machine. A query string is not. The invite link already existed and used
+`?room=CODE`, which was fine for a code and would have been fatal for a key, so it was replaced.
+
+**The proof is a transcript, not a reading of the code.** The socket tests keep every frame the
+server received and search it for the plaintext and for the secret. An assertion that the client
+called `encrypt` would pass just as happily with the plaintext sent alongside.
+
+**Rotation had to mean something.** Each client holds exactly one generation, so deriving the next
+destroys the previous one. That forced a product decision rather than a technical one: the
+transcript the retired key sealed is dropped and announced, because keeping a key for convenience
+cancels the phase, and keeping unreadable ciphertext gives the player a screen of blanks with no
+explanation (D-010). Only in encrypted rooms — a plain room has nothing to rotate, and that
+asymmetry has its own test, because it is exactly what a later refactor would flatten.
+
+**Encryption cost the server a check, so the check moved.** It could sniff an image's magic
+number while it could read the bytes; it cannot sniff ciphertext. Rather than pretend to validate,
+`inspectImage` moved to `shared/` and now runs on the receiving client after decryption. The
+guarantee is the same strength in a different place — and a server-side check on ciphertext would
+have been theatre that passed for any blob at all.
+
+**The QR code was the trap.** It reads as a small UI nicety, and every hosted QR generator works
+by being sent the thing you want encoded — which here is the URL with the key in it. So the
+encoder is in-repo: byte mode, EC level M, versions 1–10, with the specification's four penalty
+rules choosing the mask. Writing the mask penalty properly is not cosmetic; the symbol a camera
+fails to read is the one that looks to the user like a broken invitation. It is tested by decoding
+the symbol back with an independent reader at every supported version, which caught two real bugs
+in an afternoon: the reader over-reserving the middle of row 8 and column 8, where data actually
+lives, and the version-10 character count field being read as byte-aligned when it is bit-aligned.
+
+One interaction worth recording: Phase 6 lets a host open chat to spectators, and the right
+response to that under encryption was to change nothing. A spectator joins by code, holds no key,
+and therefore cannot read an encrypted room's chat whether the host opened it or not (D-011). The
+guarantee does not depend on the host understanding how two features interact.

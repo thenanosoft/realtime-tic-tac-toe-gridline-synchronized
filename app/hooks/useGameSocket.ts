@@ -14,9 +14,21 @@ import {
   type QuickReaction,
   type RoomSnapshot,
   type RoomTiming,
+  type SealedEnvelope,
   type ServerMessage,
   type StickerId,
 } from '../../shared/protocol';
+import { inspectImage } from '../../shared/imageFormat';
+import {
+  deriveRoomKey,
+  fromBase64,
+  generateRoomSecret,
+  openBytes,
+  openText,
+  sealBytes,
+  sealText,
+} from '../lib/crypto';
+import { buildInviteUrl, readInvite, shareInvite, type ShareOutcome } from '../lib/invite';
 import { prepareChatImage, ImagePreparationError } from '../lib/images';
 import { evaluateServerHello } from '../lib/protocolCompatibility';
 import { insertMessage, shouldApplyOverwrite, shouldApplySnapshot } from '../lib/ordering';
@@ -27,9 +39,18 @@ export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'dis
 export interface Notice { tone: 'error' | 'info' | 'success'; text: string }
 
 type ServerImageMessage = Extract<ChatMessageSnapshot, { kind: 'image' }>;
+/**
+ * A message this client could not open keeps its place in the transcript.
+ *
+ * Dropping it would be worse than showing it: the sequence numbers would gain a
+ * hole, and a player whose key is wrong would see a conversation that looks
+ * complete while half of it is missing. A visible "cannot be read here" is the
+ * honest rendering.
+ */
+type MaybeSealed<T> = T & { undecryptable?: boolean };
 export type ClientChatMessage =
-  | Exclude<ChatMessageSnapshot, { kind: 'image' }>
-  | (Omit<ServerImageMessage, 'data'> & { objectUrl: string });
+  | MaybeSealed<Exclude<ChatMessageSnapshot, { kind: 'image' }>>
+  | MaybeSealed<Omit<ServerImageMessage, 'data'> & { objectUrl: string }>;
 
 export interface QuickReactionPopup {
   id: string;
@@ -109,6 +130,15 @@ export function useGameSocket() {
   const [quickReactions, setQuickReactions] = useState<QuickReactionPopup[]>([]);
   const [imagePreparing, setImagePreparing] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<{ uploadId: string; received: number; expected: number } | null>(null);
+  /**
+   * The room secret, held in memory and in the URL fragment and nowhere else.
+   *
+   * Not in sessionStorage: the fragment already survives a reload, so storing a
+   * second copy would only widen the number of places the key can be read from.
+   */
+  const [roomSecret, setRoomSecret] = useState<string | null>(null);
+  /** A private room whose key this window does not hold. */
+  const [needsKey, setNeedsKey] = useState(false);
 
   const socketRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<StoredSession | null>(null);
@@ -135,6 +165,31 @@ export function useGameSocket() {
   const reactionTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const uploadGenerationRef = useRef(0);
   const activeUploadRef = useRef<string | null>(null);
+  const secretRef = useRef<string | null>(null);
+  /**
+   * Exactly one key generation is ever held.
+   *
+   * This single slot is what makes rotation mean anything: deriving the next
+   * generation overwrites the previous CryptoKey, and since derived keys are
+   * non-extractable there is no copy of it anywhere else to find (P8-05).
+   */
+  const keyRef = useRef<{ epoch: number; key: CryptoKey } | null>(null);
+  const encryptionRef = useRef<{ enabled: boolean; epoch: number }>({ enabled: false, epoch: 0 });
+  const roomCodeRef = useRef<string | null>(null);
+  /** A secret generated for a room.create that has not been acknowledged yet. */
+  const pendingSecretRef = useRef<string | null>(null);
+  const pendingInviteRef = useRef<string | null>(null);
+
+  const roomKey = useCallback(async (epoch: number): Promise<CryptoKey | null> => {
+    const secret = secretRef.current;
+    const roomCode = roomCodeRef.current;
+    if (!secret || !roomCode) return null;
+    const held = keyRef.current;
+    if (held && held.epoch === epoch) return held.key;
+    const key = await deriveRoomKey(secret, roomCode, epoch);
+    keyRef.current = { epoch, key };
+    return key;
+  }, []);
 
   const revokeMessageUrl = useCallback((messageId: string) => {
     const url = messageUrlsRef.current.get(messageId);
@@ -161,22 +216,58 @@ export function useGameSocket() {
     activeUploadRef.current = null;
   }, []);
 
-  const toClientMessage = useCallback((message: ChatMessageSnapshot): ClientChatMessage | null => {
-    if (message.kind !== 'image') return message;
-    try {
-      const binary = atob(message.data);
-      const bytes = new Uint8Array(binary.length);
-      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
-      const objectUrl = URL.createObjectURL(new Blob([bytes], { type: message.mime }));
-      messageUrlsRef.current.set(message.id, objectUrl);
-      const { data: _discarded, ...metadata } = message;
-      void _discarded;
-      return { ...metadata, objectUrl };
-    } catch {
-      setNotice({ tone: 'error', text: 'A shared image could not be displayed safely.' });
-      return null;
+  const toClientMessage = useCallback(async (message: ChatMessageSnapshot): Promise<ClientChatMessage | null> => {
+    if (message.kind === 'sticker') return message;
+    if (message.kind === 'text') {
+      if (!message.sealed) return message;
+      const key = await roomKey(message.sealed.epoch);
+      if (!key) return { ...message, text: '', undecryptable: true };
+      try {
+        // The envelope is dropped once the body is open, so nothing downstream
+        // can mistake a decrypted message for one still needing a key.
+        return { ...message, text: await openText(key, message.text, message.sealed.iv), sealed: undefined };
+      } catch {
+        return { ...message, text: '', undecryptable: true };
+      }
     }
-  }, []);
+
+    const { data, sealed, ...metadata } = message;
+    let bytes: Uint8Array;
+    if (sealed) {
+      const key = await roomKey(sealed.epoch);
+      if (!key) return { ...metadata, objectUrl: '', undecryptable: true };
+      try {
+        bytes = await openBytes(key, data, sealed.iv);
+      } catch {
+        return { ...metadata, objectUrl: '', undecryptable: true };
+      }
+    } else {
+      try {
+        bytes = fromBase64(data);
+      } catch {
+        setNotice({ tone: 'error', text: 'A shared image could not be displayed safely.' });
+        return null;
+      }
+    }
+
+    // The format check runs here, not on the server, and for sealed and plain
+    // attachments alike. A server that cannot read ciphertext cannot sniff a
+    // magic number either, so this is the only place the claim "this is a PNG
+    // of these dimensions" can still be checked against the actual bytes.
+    const inspected = inspectImage(bytes);
+    if (
+      !inspected
+      || inspected.mime !== metadata.mime
+      || inspected.width !== metadata.width
+      || inspected.height !== metadata.height
+      || bytes.byteLength !== metadata.byteLength
+    ) {
+      return { ...metadata, objectUrl: '', undecryptable: true };
+    }
+    const objectUrl = URL.createObjectURL(new Blob([bytes as BlobPart], { type: metadata.mime }));
+    messageUrlsRef.current.set(message.id, objectUrl);
+    return { ...metadata, objectUrl };
+  }, [roomKey]);
 
   const replaceChat = useCallback((chat: ChatSnapshot) => {
     for (const url of messageUrlsRef.current.values()) URL.revokeObjectURL(url);
@@ -184,22 +275,26 @@ export function useGameSocket() {
     chatSequenceRef.current = chat.sequence;
     typingSequenceRef.current.clear();
     reactionSequenceRef.current.clear();
-    setChatMessages(
-      [...chat.messages]
-        .sort((a, b) => a.sequence - b.sequence)
-        .map(toClientMessage)
-        .filter((message): message is ClientChatMessage => Boolean(message)),
-    );
+    setChatMessages([]);
+    // Decryption is asynchronous, so the transcript is rebuilt off the event
+    // loop. Ordering survives because messages are placed by sequence rather
+    // than by arrival - the same rule that already handled a late message.
+    void (async () => {
+      const decrypted = await Promise.all(
+        [...chat.messages].sort((a, b) => a.sequence - b.sequence).map(toClientMessage),
+      );
+      setChatMessages(decrypted.filter((message): message is ClientChatMessage => Boolean(message)));
+    })();
   }, [toClientMessage]);
 
-  const appendChatMessage = useCallback((message: ChatMessageSnapshot) => {
+  const appendChatMessage = useCallback(async (message: ChatMessageSnapshot) => {
     // Messages are never dropped for being late - only ever placed. A delayed
     // message still belongs in the transcript, at the position its sequence
     // says, which is why ordering here is an insert rather than an append.
     chatSequenceRef.current = Math.max(chatSequenceRef.current, message.sequence);
+    const nextMessage = await toClientMessage(message);
     setChatMessages((current) => {
       if (current.some((candidate) => candidate.id === message.id)) return current;
-      const nextMessage = toClientMessage(message);
       if (!nextMessage) return current;
       const next = insertMessage(current, nextMessage);
       let imageBytes = next.reduce((total, candidate) => (
@@ -262,8 +357,14 @@ export function useGameSocket() {
     // and without this an older board would overwrite a newer one (INV-4).
     if (!shouldApplySnapshot(revisionRef.current, incoming)) return;
     revisionRef.current = { roomCode: incoming.roomCode, revision: incoming.revision };
+    roomCodeRef.current = incoming.roomCode;
+    encryptionRef.current = incoming.encryption;
     setSnapshot(incoming);
     setTiming(incomingTiming);
+    // Derived ahead of the first message rather than on demand, so a rotation
+    // does not show up as a transcript that decrypts one message late.
+    if (incoming.encryption.enabled) void roomKey(incoming.encryption.epoch);
+    setNeedsKey(incoming.encryption.enabled && !secretRef.current);
 
     // The authority has spoken: the overlay is resolved before anything renders,
     // so a rejected mark is never painted alongside a newer board.
@@ -275,7 +376,7 @@ export function useGameSocket() {
         settleSpeculation('rejected', 'That square was taken first. The board has been restored.');
       }
     }
-  }, [settleSpeculation]);
+  }, [roomKey, settleSpeculation]);
 
   const endLocalSession = useCallback((message: string, tone: Notice['tone'] = 'info') => {
     clearSession();
@@ -292,6 +393,18 @@ export function useGameSocket() {
     setHasControl(true);
     setControlReason(null);
     clearPrivateState();
+    // The room is gone, so the key is destroyed and the fragment goes with it.
+    // Leaving a dead secret in the address bar buys nothing and keeps it alive
+    // in history, in screenshots, and in whatever gets pasted next.
+    secretRef.current = null;
+    keyRef.current = null;
+    roomCodeRef.current = null;
+    encryptionRef.current = { enabled: false, epoch: 0 };
+    setRoomSecret(null);
+    setNeedsKey(false);
+    if (typeof window !== 'undefined' && window.location.hash) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
+    }
     setNotice({ tone, text: message });
   }, [clearPrivateState]);
 
@@ -306,6 +419,22 @@ export function useGameSocket() {
           mark: message.mark,
         };
         sessionRef.current = nextSession;
+        roomCodeRef.current = message.roomCode;
+        if (pendingSecretRef.current) {
+          secretRef.current = pendingSecretRef.current;
+          setRoomSecret(pendingSecretRef.current);
+          pendingSecretRef.current = null;
+        }
+        if (secretRef.current && typeof window !== 'undefined') {
+          // The invitation becomes the address bar, so a reload still has the
+          // key and the player can copy the link from the browser if the share
+          // sheet and the clipboard both fail.
+          window.history.replaceState(
+            null,
+            '',
+            buildInviteUrl(window.location.href, { roomCode: message.roomCode, secret: secretRef.current }),
+          );
+        }
         setSession(nextSession);
         saveSession(nextSession);
         setLobbyBusy(false);
@@ -342,7 +471,7 @@ export function useGameSocket() {
         }
         return;
       case 'chat.message':
-        appendChatMessage(message.message);
+        void appendChatMessage(message.message);
         return;
       case 'chat.expired': {
         // Revoked, not just unlinked. Leaving the blob alive would keep the
@@ -440,8 +569,20 @@ export function useGameSocket() {
     const reactionTimers = reactionTimersRef.current;
     const stored = loadSession();
     sessionRef.current = stored;
+    // Read before the socket opens, so the key is in hand by the time the first
+    // snapshot arrives. A fragment is attacker-supplied text like any other, so
+    // readInvite rejects anything that is not shaped like a code and a key.
+    const invited = typeof window === 'undefined' ? null : readInvite(window.location.hash);
+    if (invited) {
+      secretRef.current = invited.secret;
+      if (!stored) pendingInviteRef.current = invited.roomCode;
+    }
+    // Deferred for the same reason the stored session is: setting state in the
+    // body of an effect cascades a render before the first one has settled.
     queueMicrotask(() => {
-      if (!stoppedRef.current) setSession(stored);
+      if (stoppedRef.current) return;
+      setSession(stored);
+      if (invited) setRoomSecret(invited.secret);
     });
 
     const connect = () => {
@@ -471,6 +612,15 @@ export function useGameSocket() {
             roomCode: sessionRef.current.roomCode,
             playerToken: sessionRef.current.playerToken,
           }));
+        }
+        // An invite is acted on once. Re-joining on every reconnect would fight
+        // the resume path, which is the mechanism that actually belongs here.
+        const invited = pendingInviteRef.current;
+        if (!sessionRef.current && invited) {
+          pendingInviteRef.current = null;
+          lastJoinAttemptRef.current = invited;
+          setLobbyBusy(true);
+          socket.send(encode({ type: 'room.join', requestId: requestId(), roomCode: invited }));
         }
         if (heartbeatRef.current) clearInterval(heartbeatRef.current);
         heartbeatRef.current = setInterval(() => {
@@ -569,9 +719,16 @@ export function useGameSocket() {
     return true;
   }, []);
 
-  const createRoom = useCallback(() => {
+  const createRoom = useCallback((options: { encrypted?: boolean } = {}) => {
     setLobbyBusy(true);
-    if (!send({ type: 'room.create', requestId: requestId() })) setLobbyBusy(false);
+    // Generated here, before the room exists, and never sent. The server is
+    // told only that bodies will be sealed (P8-01).
+    const secret = options.encrypted ? generateRoomSecret() : null;
+    pendingSecretRef.current = secret;
+    if (!send({ type: 'room.create', requestId: requestId(), encrypted: Boolean(secret) })) {
+      pendingSecretRef.current = null;
+      setLobbyBusy(false);
+    }
   }, [send]);
 
   const joinRoom = useCallback((roomCode: string) => {
@@ -636,15 +793,33 @@ export function useGameSocket() {
     send({ type: 'room.policy', requestId: requestId(), spectatorChat: allowed });
   }, [send]);
 
-  const sendChatMessage = useCallback((text: string): boolean => {
+  const sendChatMessage = useCallback(async (text: string): Promise<boolean> => {
     const normalized = text.trim();
     if (!normalized) return false;
+    // The plaintext bound is applied here because after sealing nobody can
+    // measure it - the server sees only ciphertext, and a ciphertext limit
+    // would be a limit on the wrong number.
     if (normalized.length > MAX_CHAT_TEXT_LENGTH) {
       setNotice({ tone: 'error', text: `Messages can contain up to ${MAX_CHAT_TEXT_LENGTH} characters.` });
       return false;
     }
-    return send({ type: 'chat.message', requestId: requestId(), text: normalized });
-  }, [send]);
+    const encryption = encryptionRef.current;
+    if (!encryption.enabled) {
+      return send({ type: 'chat.message', requestId: requestId(), text: normalized });
+    }
+    const key = await roomKey(encryption.epoch);
+    if (!key) {
+      setNotice({ tone: 'error', text: 'This private room needs its invite link before you can send messages.' });
+      return false;
+    }
+    const { body, iv } = await sealText(key, normalized);
+    return send({
+      type: 'chat.message',
+      requestId: requestId(),
+      text: body,
+      sealed: { iv, epoch: encryption.epoch },
+    });
+  }, [roomKey, send]);
 
   const setTyping = useCallback((typing: boolean) => {
     send({ type: 'chat.typing', typing }, true);
@@ -674,7 +849,23 @@ export function useGameSocket() {
       // out as a single WebSocket message, which the server had to accept whole
       // before it could judge it.
       const uploadId = crypto.randomUUID();
-      const chunkCount = Math.max(1, Math.ceil(prepared.data.length / UPLOAD_CHUNK_BYTES));
+      // Sealed before chunking, not per chunk: one authentication tag over the
+      // whole image means a truncated or reordered upload fails to open rather
+      // than decrypting into a partial picture.
+      const encryption = encryptionRef.current;
+      let payload = prepared.data;
+      let sealed: SealedEnvelope | undefined;
+      if (encryption.enabled) {
+        const key = await roomKey(encryption.epoch);
+        if (!key) {
+          setNotice({ tone: 'error', text: 'This private room needs its invite link before you can share an image.' });
+          return false;
+        }
+        const result = await sealBytes(key, fromBase64(prepared.data));
+        payload = result.body;
+        sealed = { iv: result.iv, epoch: encryption.epoch };
+      }
+      const chunkCount = Math.max(1, Math.ceil(payload.length / UPLOAD_CHUNK_BYTES));
       activeUploadRef.current = uploadId;
       const opened = send({
         type: 'chat.image.begin',
@@ -685,6 +876,7 @@ export function useGameSocket() {
         height: prepared.height,
         byteLength: prepared.byteLength,
         chunks: chunkCount,
+        sealed,
       });
       if (!opened) {
         activeUploadRef.current = null;
@@ -694,7 +886,7 @@ export function useGameSocket() {
         // A cancel between chunks stops the send immediately rather than
         // finishing the upload and discarding it afterwards.
         if (activeUploadRef.current !== uploadId) return false;
-        const slice = prepared.data.slice(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES);
+        const slice = payload.slice(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES);
         if (!send({ type: 'chat.image.chunk', uploadId, index, data: slice })) {
           activeUploadRef.current = null;
           return false;
@@ -711,7 +903,7 @@ export function useGameSocket() {
     } finally {
       if (generation === uploadGenerationRef.current) setImagePreparing(false);
     }
-  }, [send]);
+  }, [roomKey, send]);
 
   const cancelUpload = useCallback(() => {
     const uploadId = activeUploadRef.current;
@@ -725,6 +917,26 @@ export function useGameSocket() {
   const leaveRoom = useCallback(() => {
     send({ type: 'room.leave', requestId: requestId() });
   }, [send]);
+
+  const roomCode = session?.roomCode ?? spectator?.roomCode ?? null;
+  const inviteUrl = roomCode && typeof window !== 'undefined'
+    ? buildInviteUrl(window.location.href, { roomCode, secret: roomSecret })
+    : null;
+
+  const shareInviteLink = useCallback(async (): Promise<ShareOutcome> => {
+    if (!inviteUrl) return 'manual';
+    return shareInvite(inviteUrl, {
+      // Capability detection rather than user-agent sniffing, and the invite URL
+      // is handed over untouched: a share target that re-encodes it is exactly
+      // how a fragment gets lost.
+      share: typeof navigator !== 'undefined' && typeof navigator.share === 'function'
+        ? (data) => navigator.share(data)
+        : undefined,
+      copy: typeof navigator !== 'undefined' && navigator.clipboard
+        ? (text) => navigator.clipboard.writeText(text)
+        : undefined,
+    });
+  }, [inviteUrl]);
 
   return {
     connection,
@@ -759,6 +971,11 @@ export function useGameSocket() {
     toggleMessageReaction,
     sendImage,
     leaveRoom,
+    encrypted: snapshot?.encryption.enabled ?? false,
+    keyEpoch: snapshot?.encryption.epoch ?? 0,
+    needsKey,
+    inviteUrl,
+    shareInviteLink,
     dismissNotice: () => setNotice(null),
   };
 }

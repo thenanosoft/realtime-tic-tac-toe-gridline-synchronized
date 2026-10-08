@@ -5,6 +5,8 @@ import {
   MAX_CHAT_IMAGE_BYTES,
   MAX_CHAT_IMAGE_DIMENSION,
   MAX_CHAT_TEXT_LENGTH,
+  type RoomEncryption,
+  type SealedEnvelope,
   ROOM_IMAGE_MEMORY_LIMIT,
   PROCESS_IMAGE_MEMORY_LIMIT,
   UPLOAD_IDLE_TIMEOUT_MS,
@@ -23,6 +25,7 @@ import {
   type StickerId,
   type SupportedImageMime,
 } from '../../shared/protocol';
+import { inspectImage } from '../../shared/imageFormat';
 import { CommandError } from '../errors';
 import { generateTemporaryName } from './identity';
 
@@ -61,6 +64,7 @@ interface PendingUpload {
   height: number;
   byteLength: number;
   chunks: number;
+  sealed?: SealedEnvelope;
   parts: Array<string | undefined>;
   received: number;
   timer: ReturnType<typeof setTimeout> | null;
@@ -134,10 +138,11 @@ interface StoredChatBase {
 }
 
 type StoredChatMessage =
-  | (StoredChatBase & { kind: 'text'; text: string })
+  | (StoredChatBase & { kind: 'text'; text: string; sealed?: SealedEnvelope })
   | (StoredChatBase & { kind: 'sticker'; stickerId: StickerId })
   | (StoredChatBase & {
       kind: 'image';
+      sealed?: SealedEnvelope;
       mime: SupportedImageMime;
       width: number;
       height: number;
@@ -166,6 +171,12 @@ interface Room {
   spectators: Map<string, Spectator>;
   spectatorPolicy: SpectatorPolicy;
   contentExpiry: boolean;
+  /**
+   * Whether bodies in this room are ciphertext, and which key generation is
+   * current. The server holds no key and cannot derive one; all it does is
+   * refuse mismatched traffic and count rotations (P8-05).
+   */
+  encryption: RoomEncryption;
   /** Uploads in flight, keyed by uploadId. Freed on completion, cancel or idle. */
   uploads: Map<string, PendingUpload>;
   revision: number;
@@ -247,7 +258,7 @@ export class RoomManager {
     this.cleanupTimer.unref?.();
   }
 
-  createRoom(peer: Peer): SessionResult {
+  createRoom(peer: Peer, encrypted = false): SessionResult {
     if (this.connectionIndex.has(peer.id)) {
       throw new CommandError('ALREADY_IN_ROOM', 'This connection already belongs to a room.');
     }
@@ -267,6 +278,7 @@ export class RoomManager {
       // to anyone holding the code would be a privacy failure, not a feature.
       spectatorPolicy: { chat: false },
       contentExpiry: false,
+      encryption: { enabled: encrypted, epoch: 0 },
       uploads: new Map(),
       revision: 1,
       chatSequence: 0,
@@ -303,6 +315,12 @@ export class RoomManager {
     const player = this.createPlayer(mark, peer, names);
     room.players.set(player.id, player);
     this.connectionIndex.set(peer.id, { roomCode: room.code, playerId: player.id });
+    // A new member means a new key generation (P8-05). The arriving player
+    // holds the room secret, so without this they could derive generation 0 and
+    // read everything said before they got here - including whatever the
+    // previous occupant of this slot said. Rotating on arrival makes the
+    // transcript start when the conversation does.
+    this.rotateRoomKey(room);
     this.beginCountdown(room);
     return this.sessionResult(room, player, peer.id);
   }
@@ -523,6 +541,7 @@ export class RoomManager {
       room.game = createInitialGame();
       room.round += 1;
       room.rematchVotes.clear();
+      this.rotateRoomKey(room);
       this.beginCountdown(room);
     } else {
       room.phase = 'rematch_waiting';
@@ -531,19 +550,24 @@ export class RoomManager {
     this.broadcastGame(room, requestId);
   }
 
-  sendChatMessage(peerId: string, requestId: string, text: string): void {
+  sendChatMessage(peerId: string, requestId: string, text: string, sealed?: SealedEnvelope): void {
     const { room, player, peer } = this.requireChatMembership(peerId);
     // The ledger is consulted before the rate limiter: a client retrying a
     // command it never saw acknowledged must not be punished for the retry.
     if (this.replayChat(room, player, peer, requestId)) return;
     this.checkRate(player, 'chat', 10, 1);
-    const normalized = text.trim();
+    this.requireEncryptionAgreement(room, sealed);
+    // A sealed body is passed through byte for byte. Trimming it would break
+    // the authentication tag, and in a room where the server cannot read the
+    // text there is nothing for it to normalise anyway - the sender has already
+    // trimmed and length-checked the plaintext before sealing it.
+    const normalized = sealed ? text : text.trim();
     if (!normalized) throw new CommandError('INVALID_CHAT', 'Write a message before sending.');
-    if (normalized.length > MAX_CHAT_TEXT_LENGTH) {
+    if (!sealed && normalized.length > MAX_CHAT_TEXT_LENGTH) {
       throw new CommandError('MESSAGE_TOO_LONG', `Messages can contain up to ${MAX_CHAT_TEXT_LENGTH} characters.`);
     }
     const message: StoredChatMessage = {
-      id: randomUUID(), requestId, senderId: player.id, kind: 'text', text: normalized,
+      id: randomUUID(), requestId, senderId: player.id, kind: 'text', text: normalized, sealed,
       createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
     this.storeAndBroadcastMessage(room, player, message);
@@ -577,6 +601,57 @@ export class RoomManager {
       byteLength: bytes.byteLength, createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
     this.storeAndBroadcastMessage(room, player, message);
+  }
+
+  // --- Encryption (P8-03..P8-05) -------------------------------------------
+
+  /**
+   * Refuses traffic whose shape disagrees with the room.
+   *
+   * Without this a client could send plaintext into a room whose other member
+   * is only looking for ciphertext, and the message would land, be stored, and
+   * be rendered as an undecryptable blob - the failure would look like a
+   * cryptography bug rather than what it is. The epoch check is the same
+   * argument applied to rotation: a message sealed with a retired key is
+   * refused at the door, where the sender can be told, rather than delivered to
+   * a peer that has already destroyed the key that would open it.
+   */
+  private requireEncryptionAgreement(room: Room, sealed?: SealedEnvelope): void {
+    if (room.encryption.enabled !== Boolean(sealed)) {
+      throw new CommandError(
+        'ENCRYPTION_MISMATCH',
+        room.encryption.enabled
+          ? 'This is a private room. Reload from the invite link to rejoin it.'
+          : 'This room is not private, so an encrypted message cannot be delivered here.',
+      );
+    }
+    if (sealed && sealed.epoch !== room.encryption.epoch) {
+      throw new CommandError('ENCRYPTION_MISMATCH', 'The room key has changed. That message was not sent.');
+    }
+  }
+
+  /**
+   * Advances the key generation, and drops what the retired key sealed.
+   *
+   * The clients derive the new key from the same room secret under a new label,
+   * so nothing is exchanged here - the server only names the generation. What
+   * it must also do is discard the ciphertext from before the rotation, because
+   * after it both clients have destroyed the key that would read it. Keeping
+   * those bytes would mean holding attachment budget for a conversation that is
+   * now permanently unreadable, and showing the player a transcript of blanks.
+   */
+  private rotateRoomKey(room: Room): void {
+    if (!room.encryption.enabled) return;
+    room.encryption.epoch += 1;
+    const expired = room.chatMessages.map((message) => message.id);
+    for (const message of room.chatMessages) {
+      message.reactions.clear();
+      if (message.kind === 'image') message.data = '';
+    }
+    room.chatMessages = [];
+    room.chatImageBytes = 0;
+    if (!expired.length) return;
+    this.broadcastChat(room, { type: 'chat.expired', messageIds: expired, sequence: this.nextChatSequence(room) });
   }
 
   // --- Chunked uploads and memory budgets (P7-01..P7-08) -------------------
@@ -616,11 +691,13 @@ export class RoomManager {
       height: number;
       byteLength: number;
       chunks: number;
+      sealed?: SealedEnvelope;
     },
   ): void {
     const { room, player, peer } = this.requireChatMembership(peerId);
     if (this.replayChat(room, player, peer, requestId)) return;
     this.checkRate(player, 'image', 3, 0.1);
+    this.requireEncryptionAgreement(room, meta.sealed);
 
     if (room.uploads.has(meta.uploadId)) {
       throw new CommandError('INVALID_IMAGE', 'That upload is already in progress.');
@@ -647,6 +724,7 @@ export class RoomManager {
       height: meta.height,
       byteLength: meta.byteLength,
       chunks: meta.chunks,
+      sealed: meta.sealed,
       parts: new Array<string | undefined>(meta.chunks),
       received: 0,
       timer: null,
@@ -706,10 +784,10 @@ export class RoomManager {
 
   private completeUpload(room: Room, player: Player, upload: PendingUpload): void {
     const data = upload.parts.join('');
-    const { requestId, mime, width, height } = upload;
+    const { requestId, mime, width, height, sealed } = upload;
     this.discardUpload(room, upload);
 
-    const bytes = this.validateImage(mime, width, height, upload.byteLength, data);
+    const bytes = this.validateImage(mime, width, height, upload.byteLength, data, sealed);
     if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
       throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
     }
@@ -729,6 +807,7 @@ export class RoomManager {
       height,
       byteLength: bytes.byteLength,
       data,
+      sealed,
       createdAt: this.now(),
       sequence: 0,
       reactions: new Map(),
@@ -1007,10 +1086,27 @@ export class RoomManager {
     height: number,
     byteLength: number,
     data: string,
+    sealed?: SealedEnvelope,
   ): Buffer {
     if (!/^[A-Za-z0-9+/]+={0,2}$/.test(data)) throw new CommandError('INVALID_IMAGE', 'Image data is malformed.');
     const bytes = Buffer.from(data, 'base64');
-    if (!bytes.byteLength || bytes.byteLength !== byteLength || bytes.toString('base64') !== data) {
+    if (!bytes.byteLength || bytes.toString('base64') !== data) {
+      throw new CommandError('INVALID_IMAGE', 'Image data does not match its metadata.');
+    }
+    if (sealed) {
+      // Ciphertext cannot be sniffed, and the declared byte length is the
+      // plaintext length, which the server is in no position to check either.
+      // Rather than pretend to validate, the check moves to the only party that
+      // can perform it: the receiving client runs inspectImage on the bytes it
+      // decrypts, and refuses to render anything whose magic number does not
+      // match what the sender claimed. A server-side check here would have been
+      // theatre - it would pass for any 1KB blob at all.
+      if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
+        throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
+      }
+      return bytes;
+    }
+    if (bytes.byteLength !== byteLength) {
       throw new CommandError('INVALID_IMAGE', 'Image data does not match its metadata.');
     }
     const inspected = inspectImage(bytes);
@@ -1096,6 +1192,7 @@ export class RoomManager {
       spectatorPolicy: { ...room.spectatorPolicy },
       contentExpiry: room.contentExpiry,
       attachmentBytes: room.chatImageBytes,
+      encryption: { ...room.encryption },
       players: [...room.players.values()]
         .sort((a, b) => a.mark.localeCompare(b.mark))
         .map((player) => ({
@@ -1153,7 +1250,7 @@ export class RoomManager {
       sequence: message.sequence,
       reactions: this.reactionSnapshot(message),
     };
-    if (message.kind === 'text') return { ...base, kind: 'text', text: message.text };
+    if (message.kind === 'text') return { ...base, kind: 'text', text: message.text, sealed: message.sealed };
     if (message.kind === 'sticker') return { ...base, kind: 'sticker', stickerId: message.stickerId };
     return {
       ...base,
@@ -1163,6 +1260,7 @@ export class RoomManager {
       height: message.height,
       byteLength: message.byteLength,
       data: message.data,
+      sealed: message.sealed,
     };
   }
 
@@ -1447,107 +1545,4 @@ export class RoomManager {
       }
     }
   }
-}
-
-function inspectImage(bytes: Uint8Array): { mime: SupportedImageMime; width: number; height: number } | null {
-  if (
-    bytes.length >= 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47
-    && bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
-    && ascii(bytes, 12, 16) === 'IHDR'
-  ) {
-    return { mime: 'image/png', width: uint32Be(bytes, 16), height: uint32Be(bytes, 20) };
-  }
-
-  if (bytes.length >= 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
-    let offset = 2;
-    const startOfFrameMarkers = new Set([0xc0, 0xc1, 0xc2, 0xc3, 0xc5, 0xc6, 0xc7, 0xc9, 0xca, 0xcb, 0xcd, 0xce, 0xcf]);
-    while (offset + 8 < bytes.length) {
-      if (bytes[offset] !== 0xff) {
-        offset += 1;
-        continue;
-      }
-      const marker = bytes[offset + 1];
-      if (marker === 0xd8 || marker === 0xd9) {
-        offset += 2;
-        continue;
-      }
-      if (marker === 0xda) break;
-      const segmentLength = uint16Be(bytes, offset + 2);
-      if (segmentLength < 2 || offset + 2 + segmentLength > bytes.length) break;
-      if (startOfFrameMarkers.has(marker) && segmentLength >= 7) {
-        return {
-          mime: 'image/jpeg',
-          width: uint16Be(bytes, offset + 7),
-          height: uint16Be(bytes, offset + 5),
-        };
-      }
-      offset += 2 + segmentLength;
-    }
-    return null;
-  }
-
-  if (
-    bytes.length >= 30
-    && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46
-    && bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
-  ) {
-    const chunkType = ascii(bytes, 12, 16);
-    if (chunkType === 'VP8X') {
-      return {
-        mime: 'image/webp',
-        width: uint24Le(bytes, 24) + 1,
-        height: uint24Le(bytes, 27) + 1,
-      };
-    }
-    if (chunkType === 'VP8 ' && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
-      return {
-        mime: 'image/webp',
-        width: uint16Le(bytes, 26) & 0x3fff,
-        height: uint16Le(bytes, 28) & 0x3fff,
-      };
-    }
-    if (chunkType === 'VP8L' && bytes[20] === 0x2f) {
-      const dimensions = uint32Le(bytes, 21);
-      return {
-        mime: 'image/webp',
-        width: (dimensions & 0x3fff) + 1,
-        height: ((dimensions >>> 14) & 0x3fff) + 1,
-      };
-    }
-  }
-  return null;
-}
-
-function ascii(bytes: Uint8Array, start: number, end: number): string {
-  return String.fromCharCode(...bytes.subarray(start, end));
-}
-
-function uint16Be(bytes: Uint8Array, offset: number): number {
-  return (bytes[offset] << 8) | bytes[offset + 1];
-}
-
-function uint16Le(bytes: Uint8Array, offset: number): number {
-  return bytes[offset] | (bytes[offset + 1] << 8);
-}
-
-function uint24Le(bytes: Uint8Array, offset: number): number {
-  return bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16);
-}
-
-function uint32Be(bytes: Uint8Array, offset: number): number {
-  return (
-    bytes[offset] * 0x1000000
-    + (bytes[offset + 1] << 16)
-    + (bytes[offset + 2] << 8)
-    + bytes[offset + 3]
-  ) >>> 0;
-}
-
-function uint32Le(bytes: Uint8Array, offset: number): number {
-  return (
-    bytes[offset]
-    + (bytes[offset + 1] << 8)
-    + (bytes[offset + 2] << 16)
-    + bytes[offset + 3] * 0x1000000
-  ) >>> 0;
 }

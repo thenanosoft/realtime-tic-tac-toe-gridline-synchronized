@@ -278,7 +278,7 @@ export function executeClientMessage(message: ClientMessage, peer: Peer, manager
 function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): void {
   switch (message.type) {
     case 'room.create': {
-      const session = manager.createRoom(peer);
+      const session = manager.createRoom(peer, message.encrypted ?? false);
       peer.send({ type: 'session.ready', requestId: message.requestId, ...session });
       manager.broadcastForPeer(peer.id);
       return;
@@ -325,7 +325,7 @@ function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): voi
       manager.cancelImageUpload(peer.id, message.uploadId);
       return;
     case 'chat.message':
-      manager.sendChatMessage(peer.id, message.requestId, message.text);
+      manager.sendChatMessage(peer.id, message.requestId, message.text, message.sealed);
       return;
     case 'chat.typing':
       manager.setTyping(peer.id, message.typing);

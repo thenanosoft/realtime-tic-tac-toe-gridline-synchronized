@@ -67,6 +67,9 @@ export function GameApp() {
           onMessageReaction={game.toggleMessageReaction}
           onImage={game.sendImage}
           onLeave={game.leaveRoom}
+          inviteUrl={game.inviteUrl}
+          onShareInvite={game.shareInviteLink}
+          needsKey={game.needsKey}
         />
       )}
       {game.session && !game.spectator && !game.snapshot && (

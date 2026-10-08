@@ -123,9 +123,20 @@ serialises the whole frame.
 From Phase 8 onward, the server never receives the room secret in any form — not in a
 handshake, a frame, a header, a query string or a referrer.
 
-*Defended by:* `P8-01`, `P8-02`.
+*Defended by:* `P8-01`, `P8-02`, and `tests/encryption.test.ts`, which keeps a transcript of
+every frame the server received and searches it for both the secret and the plaintext.
 *How it breaks:* moving the secret out of the URL fragment into a query parameter, or logging
 `window.location.href`.
+
+### INV-13 — A retired key generation opens nothing
+Once the room's key epoch advances, the new generation cannot decrypt anything the previous one
+sealed, and no client retains the previous key. The server clears the ciphertext it can no
+longer have read by anyone (D-010).
+
+*Defended by:* `P8-05`, `P8-06`.
+*How it breaks:* caching derived keys by epoch "for convenience"; deriving the key from the
+secret alone so every generation produces the same key; rotating the label without rotating what
+the client holds.
 
 ### INV-10 — Capability enforcement is server-side
 A spectator's forged `game.move` or `chat.message` is rejected by the server. Client-side role

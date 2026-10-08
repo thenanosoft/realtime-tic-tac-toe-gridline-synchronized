@@ -124,7 +124,32 @@ Room destruction occurs when:
 
 A successful refresh/reconnect before destruction restores the same identity, mark, board, rematch state, and current RAM-only chat snapshot. After destruction, the old token cannot recover anything.
 
-End-to-end encryption is **not implemented**. The server authorizes and temporarily sees chat payloads in RAM. Adding genuine E2EE would require invitation-secret/key-distribution changes that were intentionally not mixed into this stability-focused extension.
+### End-to-end encryption
+
+Rooms opened with the encryption option on seal their chat **in the browser**. The server
+authorizes, orders, budgets and relays those messages without being able to read them.
+
+- The room secret is 32 random bytes generated client-side and carried in the invite link's
+  **fragment**, which browsers strip before a request leaves the machine. It is never sent in the
+  WebSocket handshake, in any frame, or in any header.
+- Keys are AES-GCM 256, derived with HKDF-SHA256 from the secret, salted with the room code and
+  labelled with a key generation. Both players derive generation *n* independently, so there is no
+  key exchange to intercept. Derived keys are non-extractable.
+- Every message carries its own 96-bit IV. Images are sealed whole and then chunked, so a
+  truncated upload fails to open rather than decrypting into a partial picture.
+- The generation rotates when a player joins and on every rematch. Each client keeps only the
+  current key, so the previous conversation becomes permanently unreadable — and the server drops
+  the ciphertext accordingly (see `docs/DECISIONS.md`, D-010).
+- Invitations share through the Web Share API, fall back to the clipboard, and show the link
+  itself as a last resort. The QR code is generated on the device; no QR service is contacted,
+  because sending this URL to one would mean handing over the key.
+
+Game state — the board, turns, presence, the room code — is **not** encrypted. The server is the
+authority on the match and has to read it. Encryption covers what the two players say to each
+other, which is the part the server has no business knowing.
+
+Spectators join by room code and therefore hold no key: in an encrypted room they cannot read the
+chat even when the host has opened it to them (D-011).
 
 ## Run locally
 

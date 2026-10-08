@@ -28,6 +28,7 @@ const snapshot = (overrides: Partial<RoomSnapshot> = {}): RoomSnapshot => ({
   spectatorPolicy: { chat: false },
   contentExpiry: false,
   attachmentBytes: 0,
+  encryption: { enabled: false, epoch: 0 },
   ...overrides,
 });
 
