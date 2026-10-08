@@ -1,15 +1,25 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import type { MessageReaction, QuickReaction, RoomSnapshot, RoomTiming, StickerId } from '../../shared/protocol';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type {
+  MessageReaction,
+  QuickReaction,
+  RoomSnapshot,
+  RoomTiming,
+  SeriesTarget,
+  StickerId,
+  TurnLimitMs,
+} from '../../shared/protocol';
 import { canPlay, type Speculation } from '../lib/speculation';
-import type { Mark } from '../../shared/game';
+import type { Cell, Mark } from '../../shared/game';
 import type { Capability } from '../../shared/protocol';
 import type { ClientChatMessage, ConnectionState, QuickReactionPopup } from '../hooks/useGameSocket';
 import { PlayerCard } from './PlayerCard';
 import { GameBoard } from './GameBoard';
 import { GameStatus } from './GameStatus';
 import { Countdown } from './Countdown';
+import { TurnClock } from './TurnClock';
+import { MatchPanel } from './MatchPanel';
 import { useGameSound } from '../hooks/useGameSound';
 import { ChatPanel } from './ChatPanel';
 import { InvitePanel } from './InvitePanel';
@@ -31,6 +41,9 @@ interface GameRoomProps {
   onClaimControl(): void;
   onMove(cell: number): void;
   onRematch(): void;
+  onFormat(format: { seriesTarget?: SeriesTarget; turnLimitMs?: TurnLimitMs | null }): void;
+  onOfferDraw(): void;
+  onRespondToDraw(accept: boolean): void;
   playSound: ReturnType<typeof useGameSound>['play'];
   chatMessages: ClientChatMessage[];
   typingPlayerId: string | null;
@@ -63,6 +76,9 @@ export function GameRoom({
   onClaimControl,
   onMove,
   onRematch,
+  onFormat,
+  onOfferDraw,
+  onRespondToDraw,
   playSound,
   chatMessages,
   typingPlayerId,
@@ -80,6 +96,8 @@ export function GameRoom({
   needsKey,
 }: GameRoomProps) {
   const [chatOpen, setChatOpen] = useState(false);
+  /** How many of the round's moves the replay has shown; null when idle. */
+  const [replayStep, setReplayStep] = useState<number | null>(null);
   const [unread, setUnread] = useState(0);
   const previousRef = useRef<RoomSnapshot | null>(null);
   const lastChatIdRef = useRef<string | null>(null);
@@ -147,6 +165,36 @@ export function GameRoom({
       return () => cancelAnimationFrame(frame);
     }
   }, [chatMessages, chatOpen, viewerId]);
+
+  /**
+   * Replay is derived, not stored.
+   *
+   * The condition includes the phase, so a replay cannot outlive the round it
+   * belongs to: if the room moves on - a rematch, or a reconnect that lands a
+   * new board - the replay stops being true and the live board returns with
+   * nothing to unwind. An effect that cleared the step would have had to race
+   * the snapshot that invalidated it.
+   */
+  const replayable = snapshot.phase === 'game_over' || snapshot.phase === 'rematch_waiting';
+  const replaying = replayable && replayStep !== null && replayStep <= snapshot.moves.length;
+  const replayBoard = useMemo(() => {
+    if (!replaying || replayStep === null) return null;
+    const cells = Array<Cell>(9).fill(null);
+    for (const move of snapshot.moves.slice(0, replayStep)) cells[move.cell] = move.mark;
+    return cells;
+  }, [replayStep, replaying, snapshot.moves]);
+
+  useEffect(() => {
+    if (!replaying || replayStep === null) return;
+    // One timer per step rather than one interval for the whole replay: a
+    // snapshot arriving mid-playback re-runs this effect, and a per-step timer
+    // picks up from wherever the replay had reached.
+    const last = replayStep >= snapshot.moves.length;
+    const timer = setTimeout(() => {
+      setReplayStep((current) => (current === null ? null : last ? null : current + 1));
+    }, last ? 1_100 : 420);
+    return () => clearTimeout(timer);
+  }, [replaying, replayStep, snapshot.moves.length]);
 
   const openChat = () => {
     setChatOpen(true);
@@ -239,6 +287,17 @@ export function GameRoom({
           </div>
         </div>
 
+        <MatchPanel
+          snapshot={snapshot}
+          viewerId={viewerId}
+          canAct={!watching && hasControl && connection === 'connected'}
+          onFormat={onFormat}
+          onOfferDraw={onOfferDraw}
+          onRespondToDraw={onRespondToDraw}
+          onReplay={() => setReplayStep(0)}
+          replaying={replaying}
+        />
+
         <div className="arena">
           <div className="arena-axis" aria-hidden="true"><i /><span>SHARED PLANE</span><i /></div>
           <div className="player-x-area"><PlayerCard mark="X" player={xPlayer} isSelf={xPlayer?.id === viewerId} snapshot={snapshot} /></div>
@@ -250,8 +309,17 @@ export function GameRoom({
                 myMark={self?.mark ?? fallbackMark}
                 interactive={canMove}
                 speculation={speculation}
+                replayBoard={replaying ? replayBoard : null}
                 onMove={onMove}
               />
+              {snapshot.phase === 'active' && snapshot.turnLimitMs !== null && timing?.turnMsRemaining != null && (
+                <TurnClock
+                  msRemaining={timing.turnMsRemaining}
+                  revision={snapshot.revision}
+                  limitMs={snapshot.turnLimitMs}
+                  yourTurn={snapshot.turn === self?.mark}
+                />
+              )}
               {snapshot.phase === 'countdown' && timing?.countdownMsRemaining != null && (
                 <Countdown msRemaining={timing.countdownMsRemaining} revision={snapshot.revision} />
               )}

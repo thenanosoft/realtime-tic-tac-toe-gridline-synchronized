@@ -29,6 +29,10 @@ const snapshot = (overrides: Partial<RoomSnapshot> = {}): RoomSnapshot => ({
   contentExpiry: false,
   attachmentBytes: 0,
   encryption: { enabled: false, epoch: 0 },
+  series: { target: 1, scores: [], draws: 0, decidedBy: null },
+  turnLimitMs: null,
+  drawOffer: null,
+  moves: [],
   ...overrides,
 });
 

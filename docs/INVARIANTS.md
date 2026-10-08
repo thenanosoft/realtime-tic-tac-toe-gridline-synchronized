@@ -138,6 +138,15 @@ longer have read by anyone (D-010).
 secret alone so every generation produces the same key; rotating the label without rotating what
 the client holds.
 
+### INV-14 — The score and the clock are the server's
+No client computes the series score, decides whether a series is over, or decides when a turn has
+expired. The snapshot carries the result; the client renders it.
+
+*Defended by:* `P9-01` … `P9-04`, and the Playwright spec that backgrounds a tab.
+*How it breaks:* counting wins locally to save a round trip, which disagrees with the server the
+first time a round ends during a reconnect — and the version the player believes is the wrong one;
+or treating a client-reported elapsed time as authoritative.
+
 ### INV-10 — Capability enforcement is server-side
 A spectator's forged `game.move` or `chat.message` is rejected by the server. Client-side role
 checks are convenience only.

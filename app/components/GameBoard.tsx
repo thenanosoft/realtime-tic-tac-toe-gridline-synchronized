@@ -1,7 +1,7 @@
 'use client';
 
 import type { KeyboardEvent } from 'react';
-import type { Mark } from '../../shared/game';
+import type { Cell, Mark } from '../../shared/game';
 import type { RoomSnapshot } from '../../shared/protocol';
 import { projectBoard, type Speculation } from '../lib/speculation';
 
@@ -11,20 +11,32 @@ interface GameBoardProps {
   interactive: boolean;
   /** A move this client has sent but the server has not yet confirmed. */
   speculation: Speculation | null;
+  /**
+   * A past position to draw instead of the live board, for replay.
+   *
+   * Passed in rather than held here: the board stays a renderer of whatever it
+   * is given, and the snapshot remains the single source of truth underneath -
+   * ending the replay restores the real position with nothing to undo.
+   */
+  replayBoard?: Cell[] | null;
   onMove(cell: number): void;
 }
 
-export function GameBoard({ snapshot, myMark, interactive, speculation, onMove }: GameBoardProps) {
-  const winningKey = snapshot.winningLine?.join('-');
+export function GameBoard({ snapshot, myMark, interactive, speculation, replayBoard, onMove }: GameBoardProps) {
+  const replaying = Boolean(replayBoard);
+  // The winning line belongs to the final position, so it stays off until the
+  // replay has reached it.
+  const winningKey = replaying ? undefined : snapshot.winningLine?.join('-');
   // The authoritative board with the pending cell overlaid. Rendering from the
   // projection rather than mutating anything keeps the snapshot the single
   // source of truth: drop the overlay and the real board is still underneath.
-  const board = projectBoard(snapshot.board, speculation);
+  const board = replayBoard ?? projectBoard(snapshot.board, speculation);
+  const playable = interactive && !replaying;
 
   const handleKey = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
       event.preventDefault();
-      if (interactive && !snapshot.board[index]) onMove(index);
+      if (playable && !snapshot.board[index]) onMove(index);
       return;
     }
     const offsets: Record<string, number> = { ArrowLeft: -1, ArrowRight: 1, ArrowUp: -3, ArrowDown: 3 };
@@ -40,10 +52,10 @@ export function GameBoard({ snapshot, myMark, interactive, speculation, onMove }
   };
 
   return (
-    <div className={`game-board preview-${myMark.toLowerCase()} ${interactive ? 'is-interactive' : ''} ${snapshot.winner ? 'has-winner' : ''}`} role="grid" aria-label="Tic-Tac-Toe board">
+    <div className={`game-board preview-${myMark.toLowerCase()} ${playable ? 'is-interactive' : ''} ${replaying ? 'is-replaying' : ''} ${snapshot.winner && !replaying ? 'has-winner' : ''}`} role="grid" aria-label={replaying ? 'Tic-Tac-Toe board, replaying the round' : 'Tic-Tac-Toe board'}>
       {board.map((mark, index) => {
-        const winning = snapshot.winningLine?.includes(index);
-        const dimmed = Boolean(snapshot.winningLine && !winning);
+        const winning = !replaying && snapshot.winningLine?.includes(index);
+        const dimmed = !replaying && Boolean(snapshot.winningLine && !winning);
         const unconfirmed = speculation?.cell === index && snapshot.board[index] === null;
         const row = Math.floor(index / 3) + 1;
         const column = index % 3 + 1;
@@ -54,7 +66,7 @@ export function GameBoard({ snapshot, myMark, interactive, speculation, onMove }
             role="gridcell"
             data-cell={index}
             className={`game-cell ${mark ? `filled mark-${mark.toLowerCase()}` : ''} ${winning ? 'winning' : ''} ${dimmed ? 'dimmed' : ''} ${unconfirmed ? 'unconfirmed' : ''}`}
-            disabled={!interactive || Boolean(mark)}
+            disabled={!playable || Boolean(mark)}
             onClick={() => onMove(index)}
             onKeyDown={(event) => handleKey(event, index)}
             aria-label={
@@ -62,7 +74,7 @@ export function GameBoard({ snapshot, myMark, interactive, speculation, onMove }
                 ? `Row ${row}, column ${column}: ${mark}, sending`
                 : mark
                   ? `Row ${row}, column ${column}: ${mark}`
-                  : `Row ${row}, column ${column}: empty${interactive ? `. Place ${myMark}` : ''}`
+                  : `Row ${row}, column ${column}: empty${playable ? `. Place ${myMark}` : ''}`
             }
           >
             {mark === 'X' && <span className="drawn-x" aria-hidden="true"><i /><i /></span>}

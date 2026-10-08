@@ -25,13 +25,18 @@ import type { Cell, Mark } from './game';
  *     and the key generation; when it is present the `text` or image `data` is
  *     ciphertext the server cannot read, and the snapshot says which generation
  *     is current. Adds `room.create.encrypted`.
+ * 7 - the match gains depth, all of it server-authoritative: a best-of series
+ *     with the score on the server, an optional turn limit enforced by the
+ *     server rather than counted by the client, a draw offer, and the move
+ *     history a replay is built from. Adds `room.format`, `draw.offer`,
+ *     `draw.respond`, `turn.expired` and `draw.declined`.
  *
  * GitHub Pages and Render deploy independently, so a version skew window always
  * exists. The server therefore keeps accepting MIN_SUPPORTED_CLIENT_PROTOCOL for
  * one release cycle rather than cutting old clients off mid-match, and clients
  * compare against `server.hello` to tell the player to refresh.
  */
-export const PROTOCOL_VERSION = 6;
+export const PROTOCOL_VERSION = 7;
 /**
  * Raised to 2 in this release, deliberately.
  *
@@ -42,7 +47,7 @@ export const PROTOCOL_VERSION = 6;
  * honest behaviour. A v2 client, by contrast, is still fully served: every v2
  * command remains valid in v3.
  */
-export const MIN_SUPPORTED_CLIENT_PROTOCOL = 5;
+export const MIN_SUPPORTED_CLIENT_PROTOCOL = 6;
 export const LEGACY_CLIENT_PROTOCOL = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
@@ -78,6 +83,18 @@ export const CONTENT_EXPIRY_MS = 5 * 60_000;
  * measure the length of something it cannot read.
  */
 export const MAX_SEALED_TEXT_LENGTH = 6_000;
+/**
+ * Series lengths, and the turn limits a host may choose.
+ *
+ * Enumerated rather than free numbers so the server is not in the business of
+ * deciding whether 1.5 seconds is a reasonable turn. A limit short enough to
+ * be unplayable is a way to grief an opponent.
+ */
+export const SERIES_TARGETS = [1, 3, 5] as const;
+export const TURN_LIMITS_MS = [15_000, 30_000] as const;
+export type SeriesTarget = (typeof SERIES_TARGETS)[number];
+export type TurnLimitMs = (typeof TURN_LIMITS_MS)[number];
+
 export const SUPPORTED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 export const STICKER_IDS = ['handshake', 'fire', 'laugh', 'mind-blown', 'bullseye', 'sparkles'] as const;
 export const QUICK_REACTIONS = ['😂', '🔥', '👏', '😮', '💀', '❤️', '🎯', '🤝'] as const;
@@ -133,6 +150,20 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
     ...envelope,
   }).strict(),
   z.object({ type: z.literal('rematch.vote'), requestId, ...envelope }).strict(),
+  /**
+   * Match format, set by the host. Both fields are optional so one can be
+   * changed without restating the other, which keeps a client that only knows
+   * about one of them from silently resetting the other.
+   */
+  z.object({
+    type: z.literal('room.format'),
+    requestId,
+    seriesTarget: z.union([z.literal(1), z.literal(3), z.literal(5)]).optional(),
+    turnLimitMs: z.union([z.literal(15_000), z.literal(30_000), z.null()]).optional(),
+    ...envelope,
+  }).strict(),
+  z.object({ type: z.literal('draw.offer'), requestId, ...envelope }).strict(),
+  z.object({ type: z.literal('draw.respond'), requestId, accept: z.boolean(), ...envelope }).strict(),
   // "Take control here": moves the player slot to this connection. A separate
   // command rather than a client-side toggle, because two windows can race for
   // the slot and the loser has to be told it lost (D-002).
@@ -229,6 +260,28 @@ export interface PlayerSnapshot {
  */
 export type Capability = 'player' | 'spectator';
 
+/**
+ * The score, held by the server because the client must not be the authority on
+ * who is winning.
+ *
+ * Keyed by player id rather than by mark: marks swap on every rematch, so a
+ * score kept against a mark would change hands with it.
+ */
+export interface SeriesSnapshot {
+  /** Rounds needed to win. 1 means a single game with no series at all. */
+  target: SeriesTarget;
+  scores: Array<{ playerId: string; wins: number }>;
+  draws: number;
+  /** Set once a player has taken the series; null while it is still open. */
+  decidedBy: string | null;
+}
+
+export interface DrawOfferSnapshot {
+  byPlayerId: string;
+  /** The round it was made in, so an offer cannot outlive its game. */
+  round: number;
+}
+
 export interface SpectatorPolicy {
   /**
    * Spectators receive no chat at all by default. Withholding it on the wire
@@ -251,6 +304,15 @@ export interface SpectatorPolicy {
 export interface RoomTiming {
   serverTime: number;
   countdownMsRemaining: number | null;
+  /**
+   * What is left of the current turn, as a duration.
+   *
+   * A duration rather than a deadline for the same reason the countdown is: the
+   * client renders it against its own monotonic clock, so a wrong wall clock
+   * cannot make a turn look longer or shorter than the server will enforce
+   * (INV-11). The server is the only thing that decides when time is up.
+   */
+  turnMsRemaining: number | null;
   reconnect: Array<{ playerId: string; msRemaining: number }>;
 }
 
@@ -279,6 +341,16 @@ export interface RoomSnapshot {
   /** Attachment bytes this room currently holds, against its budget. */
   attachmentBytes: number;
   encryption: RoomEncryption;
+  series: SeriesSnapshot;
+  /** Null when the host has not set a turn limit. */
+  turnLimitMs: TurnLimitMs | null;
+  drawOffer: DrawOfferSnapshot | null;
+  /**
+   * This round's moves in order, which is what a replay is built from. Held in
+   * the snapshot rather than reconstructed by the client so a player who joined
+   * late or reconnected can still replay the round they just watched.
+   */
+  moves: Array<{ cell: number; mark: Mark }>;
 }
 
 /** Travels with a sealed body. The server stores it and forwards it, unread. */
@@ -371,6 +443,10 @@ export type RejectionCode =
   /** The connection lacks the capability this command requires. */
   | 'FORBIDDEN'
   | 'ROOM_NOT_FULL'
+  /** A draw response arrived with no offer outstanding. */
+  | 'NO_DRAW_OFFER'
+  /** The match format cannot be changed once the series is under way. */
+  | 'FORMAT_LOCKED'
   /** A sealed body was sent to a plain room, or a plain body to a sealed one. */
   | 'ENCRYPTION_MISMATCH'
   | 'INTERNAL_ERROR';
@@ -463,5 +539,21 @@ export type ServerMessage =
       uploadId: string;
       received: number;
       expected: number;
+    }
+  | {
+      /**
+       * A turn that ran out. The board is unchanged and the turn has passed;
+       * this exists so the player is told that rather than left wondering why
+       * it is suddenly not their move.
+       */
+      type: 'turn.expired';
+      playerId: string;
+      round: number;
+    }
+  | {
+      /** Acceptance shows up as a drawn board; a decline needs saying. */
+      type: 'draw.declined';
+      byPlayerId: string;
+      ackRequestId?: string;
     }
   | { type: 'presence.pong'; sentAt: number; serverTime: number };

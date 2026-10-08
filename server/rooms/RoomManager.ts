@@ -5,8 +5,12 @@ import {
   MAX_CHAT_IMAGE_BYTES,
   MAX_CHAT_IMAGE_DIMENSION,
   MAX_CHAT_TEXT_LENGTH,
+  type DrawOfferSnapshot,
   type RoomEncryption,
   type SealedEnvelope,
+  type SeriesSnapshot,
+  type SeriesTarget,
+  type TurnLimitMs,
   ROOM_IMAGE_MEMORY_LIMIT,
   PROCESS_IMAGE_MEMORY_LIMIT,
   UPLOAD_IDLE_TIMEOUT_MS,
@@ -182,6 +186,22 @@ interface Room {
   revision: number;
   chatSequence: number;
   round: number;
+  /**
+   * The series, held here because the client must not be the authority on who
+   * is winning. Keyed by player id: marks swap every rematch, so a score kept
+   * against a mark would change hands with it.
+   */
+  seriesTarget: SeriesTarget;
+  seriesWins: Map<string, number>;
+  seriesDraws: number;
+  seriesDecidedBy: string | null;
+  /** Null unless the host set a limit. */
+  turnLimitMs: TurnLimitMs | null;
+  turnEndsAt: number | null;
+  turnTimer: ReturnType<typeof setTimeout> | null;
+  drawOffer: DrawOfferSnapshot | null;
+  /** This round's moves in order - the material a replay is made of. */
+  moves: Array<{ cell: number; mark: Mark }>;
   countdownEndsAt: number | null;
   createdAt: number;
   updatedAt: number;
@@ -205,6 +225,16 @@ export interface RoomManagerOptions {
    * ten megabytes of real image data through the socket.
    */
   roomImageLimitBytes?: number;
+  /**
+   * Collapses the chosen turn limit to something a test can wait for.
+   *
+   * The limits a host may pick are enumerated in the protocol, so a room cannot
+   * be given a 60ms turn in production - which is also why this is an option
+   * rather than a value the client may send. What is under test is that the
+   * server decides when time is up, and that does not depend on how long the
+   * limit is.
+   */
+  turnLimitOverrideMs?: number;
   processImageLimitBytes?: number;
   now?: () => number;
 }
@@ -240,6 +270,7 @@ export class RoomManager {
   private readonly reservationTtlMs: number;
   private readonly typingTtlMs: number;
   private readonly roomImageLimit: number;
+  private readonly turnLimitOverrideMs: number | null;
   private readonly processImageLimit: number;
   private readonly cleanupTimer: ReturnType<typeof setInterval>;
   private readonly now: () => number;
@@ -252,6 +283,7 @@ export class RoomManager {
     this.reservationTtlMs = options.reservationTtlMs ?? 10 * 60_000;
     this.typingTtlMs = options.typingTtlMs ?? 2_500;
     this.roomImageLimit = options.roomImageLimitBytes ?? ROOM_IMAGE_MEMORY_LIMIT;
+    this.turnLimitOverrideMs = options.turnLimitOverrideMs ?? null;
     this.processImageLimit = options.processImageLimitBytes ?? PROCESS_IMAGE_MEMORY_LIMIT;
     this.now = options.now ?? Date.now;
     this.cleanupTimer = setInterval(() => this.sweep(), options.cleanupIntervalMs ?? 15_000);
@@ -283,6 +315,17 @@ export class RoomManager {
       revision: 1,
       chatSequence: 0,
       round: 1,
+      // A single game by default: a series is something a host opts into, not a
+      // commitment two strangers are signed up to before they have played once.
+      seriesTarget: 1,
+      seriesWins: new Map(),
+      seriesDraws: 0,
+      seriesDecidedBy: null,
+      turnLimitMs: null,
+      turnEndsAt: null,
+      turnTimer: null,
+      drawOffer: null,
+      moves: [],
       countdownEndsAt: null,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -510,9 +553,183 @@ export class RoomManager {
       throw error;
     }
     this.remember(player, requestId, { kind: 'game' });
-    if (room.game.winner || room.game.isDraw) room.phase = 'game_over';
+    room.moves.push({ cell, mark: player.mark });
+    // Playing is a decline. The alternative - leaving the offer standing while
+    // the position changes - means a player can accept a draw in a position
+    // that no longer exists.
+    room.drawOffer = null;
+    if (room.game.winner || room.game.isDraw) this.concludeRound(room);
+    else this.armTurnTimer(room);
     this.bump(room);
     this.broadcastGame(room, requestId);
+  }
+
+  // --- Series, turn limit and draws (P9-01..P9-06) --------------------------
+
+  /** Rounds a player must win to take the series. */
+  private seriesThreshold(room: Room): number {
+    return Math.ceil(room.seriesTarget / 2);
+  }
+
+  /**
+   * Books the result of a finished round.
+   *
+   * The single place a score changes, so a round cannot be counted twice - the
+   * failure that would be hardest to see, because the board would look right
+   * and only the score would be wrong.
+   */
+  private concludeRound(room: Room): void {
+    room.phase = 'game_over';
+    this.clearTurnTimer(room);
+    room.drawOffer = null;
+    if (room.game.isDraw || !room.game.winner) {
+      room.seriesDraws += 1;
+      return;
+    }
+    const winner = [...room.players.values()].find((candidate) => candidate.mark === room.game.winner);
+    if (!winner) return;
+    const wins = (room.seriesWins.get(winner.id) ?? 0) + 1;
+    room.seriesWins.set(winner.id, wins);
+    if (wins >= this.seriesThreshold(room)) room.seriesDecidedBy = winner.id;
+  }
+
+  setMatchFormat(
+    peerId: string,
+    requestId: string,
+    format: { seriesTarget?: SeriesTarget; turnLimitMs?: TurnLimitMs | null },
+  ): void {
+    const { room, player, peer } = this.requireControl(peerId);
+    if (this.recall(player, requestId)) {
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      return;
+    }
+    if (room.hostPlayerId !== player.id) {
+      throw new CommandError('FORBIDDEN', 'Only the host can change the match format.');
+    }
+    // Locked once a round has been decided, and not before. Changing the
+    // target mid-series would retroactively decide or undecide it; changing it
+    // during the first round decides nothing, and a host who only thinks to set
+    // "best of three" after the opening move should not have to leave and
+    // rebuild the room to get it.
+    const played = room.seriesDraws + [...room.seriesWins.values()].reduce((total, wins) => total + wins, 0);
+    if (played > 0) {
+      throw new CommandError('FORMAT_LOCKED', 'The match format can only be changed before a round has been decided.');
+    }
+    this.remember(player, requestId, { kind: 'game' });
+    if (format.seriesTarget !== undefined) room.seriesTarget = format.seriesTarget;
+    if (format.turnLimitMs !== undefined) {
+      room.turnLimitMs = format.turnLimitMs;
+      // Re-armed rather than recalculated: the player to move gets the new
+      // allowance in full. Truncating a turn someone is already thinking
+      // through would be a worse surprise than a turn that got longer.
+      this.armTurnTimer(room);
+    }
+    this.bump(room);
+    this.broadcastGame(room, requestId);
+  }
+
+  offerDraw(peerId: string, requestId: string): void {
+    const { room, player, peer } = this.requireControl(peerId);
+    if (this.recall(player, requestId)) {
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      return;
+    }
+    if (room.phase !== 'active') throw new CommandError('GAME_NOT_ACTIVE', 'A draw can only be offered during a round.');
+    this.remember(player, requestId, { kind: 'game' });
+
+    const outstanding = room.drawOffer;
+    if (outstanding && outstanding.byPlayerId !== player.id) {
+      // Both players offered at once, which is not a race to resolve but an
+      // agreement to honour. Treating the second offer as an acceptance is the
+      // only reading that does not throw away what both players just said.
+      this.settleDraw(room, requestId);
+      return;
+    }
+    // A repeat offer from the same player is left alone rather than refreshed:
+    // re-offering must not become a way to pester an opponent.
+    room.drawOffer = outstanding ?? { byPlayerId: player.id, round: room.round };
+    this.bump(room);
+    this.broadcastGame(room, requestId);
+  }
+
+  respondToDraw(peerId: string, requestId: string, accept: boolean): void {
+    const { room, player, peer } = this.requireControl(peerId);
+    if (this.recall(player, requestId)) {
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      return;
+    }
+    const outstanding = room.drawOffer;
+    // The round check is what makes a late response safe: an acceptance that
+    // was in flight while the round ended must not draw the next one.
+    if (!outstanding || outstanding.round !== room.round || room.phase !== 'active') {
+      throw new CommandError('NO_DRAW_OFFER', 'There is no draw offer to answer.');
+    }
+    if (outstanding.byPlayerId === player.id) {
+      throw new CommandError('FORBIDDEN', 'You cannot answer your own draw offer.');
+    }
+    this.remember(player, requestId, { kind: 'game' });
+    if (!accept) {
+      room.drawOffer = null;
+      this.bump(room);
+      this.broadcast(room, { type: 'draw.declined', byPlayerId: player.id });
+      this.broadcastGame(room, requestId);
+      return;
+    }
+    this.settleDraw(room, requestId);
+  }
+
+  /** Ends the round as a draw by agreement, through the one scoring path. */
+  private settleDraw(room: Room, requestId: string): void {
+    room.game = { ...room.game, isDraw: true, winner: null, winningLine: null };
+    this.concludeRound(room);
+    this.bump(room);
+    this.broadcastGame(room, requestId);
+  }
+
+  /**
+   * Starts the clock on the turn that is now to move.
+   *
+   * Enforced here and nowhere else. A client-side timer can be stopped by
+   * backgrounding a tab, and a client-side timer that is merely *reported* to
+   * the server can be lied about; the server holding the deadline makes both
+   * irrelevant (P9-04).
+   */
+  private armTurnTimer(room: Room): void {
+    this.clearTurnTimer(room);
+    if (!room.turnLimitMs || room.phase !== 'active') {
+      room.turnEndsAt = null;
+      return;
+    }
+    const limit = this.turnLimitOverrideMs ?? room.turnLimitMs;
+    room.turnEndsAt = this.now() + limit;
+    room.turnTimer = setTimeout(() => {
+      room.turnTimer = null;
+      this.expireTurn(room);
+    }, limit);
+    room.turnTimer.unref?.();
+  }
+
+  private clearTurnTimer(room: Room): void {
+    if (room.turnTimer) clearTimeout(room.turnTimer);
+    room.turnTimer = null;
+  }
+
+  /**
+   * Passes the turn when it runs out.
+   *
+   * The turn passes rather than the round being forfeited. Losing a game to a
+   * phone that locked its screen is a worse outcome than losing a move, and the
+   * player who keeps running out of time loses anyway by never placing a mark.
+   */
+  private expireTurn(room: Room): void {
+    if (!this.rooms.has(room.code) || room.phase !== 'active' || !room.turnLimitMs) return;
+    const losing = [...room.players.values()].find((candidate) => candidate.mark === room.game.turn);
+    room.game = { ...room.game, turn: room.game.turn === 'X' ? 'O' : 'X' };
+    room.drawOffer = null;
+    this.armTurnTimer(room);
+    this.bump(room);
+    if (losing) this.broadcast(room, { type: 'turn.expired', playerId: losing.id, round: room.round });
+    this.broadcastGame(room);
   }
 
   voteRematch(peerId: string, requestId: string): void {
@@ -541,6 +758,16 @@ export class RoomManager {
       room.game = createInitialGame();
       room.round += 1;
       room.rematchVotes.clear();
+      room.moves = [];
+      room.drawOffer = null;
+      // A decided series starts a new one rather than continuing past its own
+      // conclusion. Carrying a finished score forward would mean the next round
+      // decides a series that was already over.
+      if (room.seriesDecidedBy) {
+        room.seriesWins.clear();
+        room.seriesDraws = 0;
+        room.seriesDecidedBy = null;
+      }
       this.rotateRoomKey(room);
       this.beginCountdown(room);
     } else {
@@ -1032,6 +1259,7 @@ export class RoomManager {
       } else {
         room.phase = 'active';
         room.pausedFrom = null;
+        this.armTurnTimer(room);
       }
       room.countdownEndsAt = null;
       this.bump(room);
@@ -1155,6 +1383,18 @@ export class RoomManager {
     return true;
   }
 
+  /**
+   * A match event, to everyone watching the match.
+   *
+   * Separate from broadcastChat: a turn running out or a draw being declined is
+   * part of the game, not part of the conversation, so the spectator chat
+   * policy has nothing to say about it.
+   */
+  private broadcast(room: Room, message: ServerMessage): void {
+    for (const player of room.players.values()) this.sendToPlayer(player, message);
+    for (const spectator of room.spectators.values()) spectator.peer.send(message);
+  }
+
   private broadcastGame(room: Room, ackRequestId?: string): void {
     const message: ServerMessage = {
       type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId,
@@ -1193,6 +1433,10 @@ export class RoomManager {
       contentExpiry: room.contentExpiry,
       attachmentBytes: room.chatImageBytes,
       encryption: { ...room.encryption },
+      series: this.seriesSnapshot(room),
+      turnLimitMs: room.turnLimitMs,
+      drawOffer: room.drawOffer ? { ...room.drawOffer } : null,
+      moves: room.moves.map((move) => ({ ...move })),
       players: [...room.players.values()]
         .sort((a, b) => a.mark.localeCompare(b.mark))
         .map((player) => ({
@@ -1208,6 +1452,22 @@ export class RoomManager {
   }
 
   /**
+   * The score, ordered by mark so two clients at the same revision hold the
+   * same bytes (INV-3). A Map iterates in insertion order, which differs
+   * between a client that was here first and one that reconnected.
+   */
+  private seriesSnapshot(room: Room): SeriesSnapshot {
+    return {
+      target: room.seriesTarget,
+      scores: [...room.players.values()]
+        .sort((a, b) => a.mark.localeCompare(b.mark))
+        .map((player) => ({ playerId: player.id, wins: room.seriesWins.get(player.id) ?? 0 })),
+      draws: room.seriesDraws,
+      decidedBy: room.seriesDecidedBy,
+    };
+  }
+
+  /**
    * Deadlines leave the server as durations, never as absolute epochs, so a
    * client with a wrong clock cannot mis-render or mis-enforce them (INV-11).
    */
@@ -1218,6 +1478,7 @@ export class RoomManager {
       countdownMsRemaining: room.countdownEndsAt === null
         ? null
         : Math.max(0, room.countdownEndsAt - timestamp),
+      turnMsRemaining: room.turnEndsAt === null ? null : Math.max(0, room.turnEndsAt - timestamp),
       reconnect: [...room.players.values()]
         .filter((player) => player.reconnectDeadline !== null)
         .map((player) => ({

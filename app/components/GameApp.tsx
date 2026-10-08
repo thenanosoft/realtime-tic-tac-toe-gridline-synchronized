@@ -55,6 +55,9 @@ export function GameApp() {
           onClaimControl={game.claimControl}
           onMove={game.move}
           onRematch={game.voteRematch}
+          onFormat={game.setMatchFormat}
+          onOfferDraw={game.offerDraw}
+          onRespondToDraw={game.respondToDraw}
           playSound={sound.play}
           chatMessages={game.chatMessages}
           typingPlayerId={game.typingPlayerId}

@@ -670,3 +670,49 @@ One interaction worth recording: Phase 6 lets a host open chat to spectators, an
 response to that under encryption was to change nothing. A spectator joins by code, holds no key,
 and therefore cannot read an encrypted room's chat whether the host opened it or not (D-011). The
 guarantee does not depend on the host understanding how two features interact.
+
+---
+
+## 2026-10-08 — Phase 9 closed: depth in the match, authority unchanged
+
+Branch `phase/9-match-features`. **184 unit tests** (up from 167) plus two new Playwright specs.
+Protocol v7.
+
+Four features, one rule: the server decides. The series score, whether a series is over, when a
+turn expires, whether a draw stands — all of it is snapshot state the client renders.
+
+**The score is keyed by player, not by mark.** Marks swap on every rematch, so a score kept
+against a mark changes hands with it. The test plays three rounds specifically to catch this: the
+same person wins round one as X and round two as O, and a mark-keyed score would credit the second
+win to the loser.
+
+**A turn that runs out passes rather than forfeits** (D-012). The usual cause of an expired turn
+is a phone locking its screen, and ending someone's game for that is a worse product than ending
+their move. The competitive objection answers itself — a player who keeps running out loses anyway
+by never placing a mark. The expiry is announced, because the board does not change and the turn
+would otherwise move for no visible reason.
+
+**Playwright earns its keep here.** The unit suite proves the server expires a turn against its
+own clock, which is the invariant. What it cannot show is a real tab that stops receiving timers:
+Chromium throttles a backgrounded one, and a client-side countdown would simply stop. So the spec
+opens a second page to genuinely background the first, waits past the limit, and finds the turn
+gone and the board untouched.
+
+**Simultaneous draw offers are an agreement, not a race** (D-013). Both players just said they
+want a draw; any answer other than "drawn" throws that away and makes the result depend on arrival
+order neither player can see. Playing on withdraws an offer, because otherwise a player could
+accept a draw in a position that no longer exists — and a response carries the round it answers,
+so an acceptance in flight when the round ended cannot draw the next one.
+
+**Replay is derived, not stored.** The playback condition includes the phase, so a replay cannot
+outlive its round: if the room moves on, the replay stops being true and the live board returns
+with nothing to unwind. Holding the step in state and clearing it from an effect would have meant
+racing the snapshot that invalidated it.
+
+Two bugs worth recording, both in the tests rather than the server, and both the same shape: a
+`waitFor` scanning the whole message history matched states the room had already left. Round two
+refills the same cells as round one, so "wait until cell 3 is filled" was satisfied instantly by a
+round-one snapshot and the test raced ahead of the move it was waiting for. The fix is a cursor —
+wait only on frames that arrived after the send. This is the third time this shape has appeared
+(the e2e suite hit it in Phase 5), which is a sign the helper should have carried a cursor from
+the start.

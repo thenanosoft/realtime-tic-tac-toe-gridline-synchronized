@@ -271,15 +271,40 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 9 — Match features
 
-- [ ] **P9-01** Best-of-3 / best-of-5 ephemeral series with server-authoritative score.
-- [ ] **P9-02** Series state survives reconnects and integrates with rematch.
-- [ ] **P9-03** Optional 15s/30s turn timer, server-authoritative.
-- [ ] **P9-04** Timer correctness: a backgrounded tab gains no extra time and loses none to
-      browser throttling.
-- [ ] **P9-05** Draw offer with accept/reject.
-- [ ] **P9-06** Draw offer race safety — simultaneous offers and offer-vs-move resolve cleanly.
-- [ ] **P9-07** Near-simultaneous rematch votes produce exactly one transition.
-- [ ] **P9-08** In-session replay animation, destroyed with the room, never persisted.
+- [x] **P9-01** The score lives on the server, keyed by **player id and not by mark** — marks
+      swap on every rematch, so a score kept against a mark would change hands with it. A single
+      game is the default: a series is opted into, not something two strangers are signed up to
+      before they have played once.
+- [x] **P9-02** It survives a reconnect because it was never on the client. The format is locked
+      once a round has been decided and open before that, which is the same rule the UI shows — a
+      control that vanished when the round began would forbid something the server allows.
+      Changing the turn limit mid-round **re-arms** the clock rather than truncating a turn
+      someone is already thinking through.
+- [x] **P9-03** 15s or 30s, enumerated in the protocol rather than taken as a number: a limit
+      short enough to be unplayable is a way to grief an opponent. The deadline leaves the server
+      as a *duration* (INV-11), and `turnLimitOverrideMs` lets a test reach a real expiry without
+      waiting fifteen real seconds.
+- [x] **P9-04** The turn **passes**; the round is not forfeited (D-012). Losing a game to a phone
+      that locked its screen is a worse outcome than losing a move, and a player who keeps running
+      out loses anyway by never placing a mark. Verified in Playwright by genuinely backgrounding
+      a tab — the one condition a client-side countdown cannot survive, since Chromium throttles
+      its timers. The expiry is **announced** (`turn.expired`): the board does not change, so
+      without it the turn would have moved for no visible reason.
+- [x] **P9-05** `draw.offer` / `draw.respond`, with the decline announced because acceptance is
+      visible as a drawn board and a decline is not.
+- [x] **P9-06** Three races, three answers (D-013). Simultaneous offers are an **agreement**, not
+      a race: the second offer finds the first outstanding and settles the draw, because refusing
+      it would throw away what both players just said. Playing on **withdraws** the offer —
+      otherwise a player could accept a draw in a position that no longer exists. And a response
+      carries the round it answers, so an acceptance in flight when the round ended cannot draw
+      the next one.
+- [x] **P9-07** Already structurally safe through the vote set; now asserted. Duplicate and
+      simultaneous votes produce exactly one round transition, with the whole snapshot history
+      checked for an intermediate round nobody should have seen.
+- [x] **P9-08** The move history is in the snapshot, so a window that reconnected mid-round can
+      still replay it. Replay is **derived** from the phase and a step index rather than stored:
+      if the room moves on, the replay stops being true and the live board returns with nothing to
+      unwind, which an effect clearing the state would have had to race.
 
 ## Phase 10 — Generated identity and procedural arena
 

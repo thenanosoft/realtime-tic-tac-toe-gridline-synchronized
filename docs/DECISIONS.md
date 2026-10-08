@@ -286,3 +286,38 @@ encryption decides whether sending it discloses anything.
 open, and the panel tells them so rather than showing blanks. The privacy guarantee therefore does
 not depend on the host understanding the interaction between two features, which is the sort of
 dependency that eventually produces a leak.
+
+## D-012 — A turn that runs out passes rather than forfeits · **DECIDED** · 2026-10-08
+
+**Context.** The turn limit has to do something when it expires. The two candidate answers are
+that the player loses the round, or that the player loses the move.
+
+**Decision.** The turn passes. The board is untouched, the clock restarts for the other side, and
+the player is told what happened.
+
+**Why.** A forfeit punishes the wrong failure. The common cause of a turn running out is not
+stalling, it is a phone locking its screen or a laptop sleeping, and ending someone's game for
+that is a worse product than ending their move. The competitive argument for forfeiting is also
+weak: a player who keeps running out of time loses anyway, because they never place a mark.
+
+**Consequence.** An idle room with a turn limit passes the turn back and forth indefinitely rather
+than resolving. That is acceptable: the presence and room-expiry sweeps already collect rooms
+nobody is playing, so this adds no new way for a room to live forever. It also means a timed-out
+turn records **no move**, which the replay test asserts - a replay shows what was played, and a
+turn nobody used is not a move.
+
+## D-013 — Simultaneous draw offers are an agreement, not a race · **DECIDED** · 2026-10-08
+
+**Context.** Both players can send `draw.offer` in the same tick. The obvious implementations
+either refuse the second offer, because the room already has one, or replace the first with it.
+
+**Decision.** The second offer, arriving to find the opponent's offer outstanding, **settles the
+draw**.
+
+**Why.** Both players have just said they want a draw. Any answer other than "drawn" throws that
+away and makes the outcome depend on arrival order, which neither player can observe or control.
+Refusing the second offer is the worst option: it leaves one player believing they declined
+something and the other waiting for an answer to an offer that was already answered.
+
+**Consequence.** A repeated offer from the *same* player is deliberately not refreshed, so
+re-offering cannot become a way to pester an opponent with a prompt they have to dismiss.

@@ -15,8 +15,10 @@ import {
   type RoomSnapshot,
   type RoomTiming,
   type SealedEnvelope,
+  type SeriesTarget,
   type ServerMessage,
   type StickerId,
+  type TurnLimitMs,
 } from '../../shared/protocol';
 import { inspectImage } from '../../shared/imageFormat';
 import {
@@ -557,6 +559,21 @@ export function useGameSocket() {
         setNotice({ tone: 'info', text: verdict.message });
         return;
       }
+      case 'turn.expired': {
+        // Said out loud. The board does not change when a turn runs out, so
+        // without this the turn would simply have moved for no visible reason.
+        const who = message.playerId === sessionRef.current?.playerId ? 'Your' : 'Their';
+        setNotice({ tone: 'info', text: who + ' turn ran out. The move passed to the other side.' });
+        return;
+      }
+      case 'draw.declined':
+        setNotice({
+          tone: 'info',
+          text: message.byPlayerId === sessionRef.current?.playerId
+            ? 'You declined the draw. The round continues.'
+            : 'They declined the draw. The round continues.',
+        });
+        return;
       case 'presence.pong':
         return;
     }
@@ -778,6 +795,18 @@ export function useGameSocket() {
     send({ type: 'rematch.vote', requestId: requestId() });
   }, [send]);
 
+  const setMatchFormat = useCallback((format: { seriesTarget?: SeriesTarget; turnLimitMs?: TurnLimitMs | null }) => {
+    send({ type: 'room.format', requestId: requestId(), ...format });
+  }, [send]);
+
+  const offerDraw = useCallback(() => {
+    send({ type: 'draw.offer', requestId: requestId() });
+  }, [send]);
+
+  const respondToDraw = useCallback((accept: boolean) => {
+    send({ type: 'draw.respond', requestId: requestId(), accept });
+  }, [send]);
+
   const claimControl = useCallback(() => {
     send({ type: 'session.claim', requestId: requestId() });
   }, [send]);
@@ -964,6 +993,9 @@ export function useGameSocket() {
     joinRoom,
     move,
     voteRematch,
+    setMatchFormat,
+    offerDraw,
+    respondToDraw,
     sendChatMessage,
     setTyping,
     sendSticker,
