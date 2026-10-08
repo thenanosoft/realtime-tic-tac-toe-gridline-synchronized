@@ -183,16 +183,23 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 6 — Spectators and capability tokens
 
-- [ ] **P6-01** Capability token model: `player`, `spectator`, `host`. Room-scoped, no accounts,
-      no persistence.
-- [ ] **P6-02** Server-side authorisation of every command by capability — never trust a
-      client-sent role.
-- [ ] **P6-03** Spectator join by room code when the room is full.
-- [ ] **P6-04** Spectators cannot move, chat or react.
-- [ ] **P6-05** Spectator privacy default: game state only. No chat, images or reactions on the
-      wire unless host policy grants it.
-- [ ] **P6-06** Host-grants-chat flow with revocation.
-- [ ] **P6-07** Spectator presence visible to players; join/leave never disturbs the match.
+- [x] **P6-01** `Capability = 'player' | 'spectator'`, with host as a capability on a player
+      slot (Phase 4). Room-scoped and ephemeral: a spectator holds **no token at all** and cannot
+      resume, which is what keeps it genuinely a different thing rather than a player with fewer
+      permissions — there is no identity worth reclaiming, so reconnecting just means watching again.
+- [x] **P6-02** `requireMembership` now recognises a spectator and refuses with `FORBIDDEN`
+      rather than the confusing and untrue `NOT_IN_ROOM`. Tested with hand-written frames that
+      bypass any client-side check.
+- [x] **P6-03** `room.spectate`. Refused with `ROOM_NOT_FULL` when a seat is still open — a room
+      waiting for a second player wants a player, not an audience.
+- [x] **P6-04** Move, chat, reaction, rematch vote and control claim all refused.
+- [x] **P6-05** Withheld at the source: with chat closed a spectator's socket never carries the
+      frame, so there is nothing a patched client could reveal. The test reads the socket rather
+      than the screen and asserts the message text appears nowhere in it.
+- [x] **P6-06** `room.policy`, host-only — the guest's attempt is refused with `FORBIDDEN`.
+      Revocation takes effect immediately; the next message does not reach the watcher.
+- [x] **P6-07** `spectatorCount` in the authoritative snapshot, with a host-only banner offering
+      the policy toggle. Joining and leaving leave the phase and both player slots untouched.
 
 ## Phase 7 — Media pipeline, memory and backpressure
 

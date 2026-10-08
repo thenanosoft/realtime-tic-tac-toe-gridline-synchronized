@@ -557,6 +557,39 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .presence-reconnecting span { color: #d3b877; background: currentColor; animation: status-ping 1.5s ease-out infinite; }
 .presence-offline span, .presence-expired span { color: var(--x); background: currentColor; }
 
+.spectator-banner { border-color: rgba(var(--o-rgb), .26); background: rgba(var(--o-rgb), .05); }
+.spectator-banner > span { color: var(--o); }
+.host-policy { border-color: rgba(var(--o-rgb), .2); background: rgba(var(--o-rgb), .04); }
+.host-policy > span { color: var(--o); }
+.spectate-offer {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 13px 0 0;
+  padding: 11px 13px;
+  border: 1px solid rgba(var(--o-rgb), .22);
+  border-radius: 9px;
+  color: #c6c7c2;
+  background: rgba(var(--o-rgb), .05);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+.spectate-offer > span { color: var(--o); font-size: 15px; line-height: 1; }
+.spectate-offer b { color: var(--ink); font: 650 var(--text-2xs)/1 var(--font-geist-mono), monospace; letter-spacing: .12em; }
+.spectate-offer button {
+  flex: 0 0 auto;
+  margin-left: auto;
+  height: 34px;
+  padding: 0 13px;
+  border: 1px solid rgba(var(--o-rgb), .3);
+  border-radius: 7px;
+  color: var(--ink);
+  background: rgba(var(--o-rgb), .1);
+  font-size: var(--text-2xs);
+  font-weight: 620;
+}
+.spectate-offer button:disabled { opacity: .45; }
+
 .room-actions { display: flex; align-items: center; gap: 7px; }
 .chat-toggle, .leave-room {
   height: 40px;

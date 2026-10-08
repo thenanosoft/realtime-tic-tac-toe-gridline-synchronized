@@ -14,13 +14,16 @@ import type { Cell, Mark } from './game';
  *     attach to one player, exactly one holds control, and presence becomes a
  *     four-state machine rather than a boolean. Adds `session.claim`,
  *     `session.control`, and host identity.
+ * 4 - capabilities: a connection is a player or a spectator, and every command is
+ *     authorised against that rather than against membership alone. Adds
+ *     `room.spectate`, `room.policy` and `spectator.ready`.
  *
  * GitHub Pages and Render deploy independently, so a version skew window always
  * exists. The server therefore keeps accepting MIN_SUPPORTED_CLIENT_PROTOCOL for
  * one release cycle rather than cutting old clients off mid-match, and clients
  * compare against `server.hello` to tell the player to refresh.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 /**
  * Raised to 2 in this release, deliberately.
  *
@@ -31,7 +34,7 @@ export const PROTOCOL_VERSION = 3;
  * honest behaviour. A v2 client, by contrast, is still fully served: every v2
  * command remains valid in v3.
  */
-export const MIN_SUPPORTED_CLIENT_PROTOCOL = 2;
+export const MIN_SUPPORTED_CLIENT_PROTOCOL = 3;
 export const LEGACY_CLIENT_PROTOCOL = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
@@ -82,6 +85,8 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
   // command rather than a client-side toggle, because two windows can race for
   // the slot and the loser has to be told it lost (D-002).
   z.object({ type: z.literal('session.claim'), requestId, ...envelope }).strict(),
+  z.object({ type: z.literal('room.spectate'), requestId, roomCode, ...envelope }).strict(),
+  z.object({ type: z.literal('room.policy'), requestId, spectatorChat: z.boolean(), ...envelope }).strict(),
   z.object({ type: z.literal('chat.message'), requestId, text: z.string().min(1).max(MAX_CHAT_TEXT_LENGTH), ...envelope }).strict(),
   z.object({ type: z.literal('chat.typing'), typing: z.boolean(), ...envelope }).strict(),
   z.object({ type: z.literal('chat.quick-reaction'), requestId, reaction: z.enum(QUICK_REACTIONS), ...envelope }).strict(),
@@ -140,6 +145,21 @@ export interface PlayerSnapshot {
 }
 
 /**
+ * What a connection may do. Decided by the server, never asserted by the client.
+ * Room-scoped and ephemeral - there are no accounts behind these.
+ */
+export type Capability = 'player' | 'spectator';
+
+export interface SpectatorPolicy {
+  /**
+   * Spectators receive no chat at all by default. Withholding it on the wire
+   * rather than hiding it in the UI is what separates a policy from a
+   * suggestion.
+   */
+  chat: boolean;
+}
+
+/**
  * Emission-scoped timing, deliberately kept *outside* RoomSnapshot.
  *
  * Durations decay with wall-clock time, so a snapshot containing them would
@@ -172,6 +192,9 @@ export interface RoomSnapshot {
   isDraw: boolean;
   round: number;
   players: PlayerSnapshot[];
+  /** How many people are watching without holding a slot. */
+  spectatorCount: number;
+  spectatorPolicy: SpectatorPolicy;
 }
 
 export interface ChatReactionSnapshot {
@@ -235,6 +258,9 @@ export type RejectionCode =
   | 'PROTOCOL_MISMATCH'
   /** This window is attached but another one holds the player slot. */
   | 'NOT_IN_CONTROL'
+  /** The connection lacks the capability this command requires. */
+  | 'FORBIDDEN'
+  | 'ROOM_NOT_FULL'
   | 'INTERNAL_ERROR';
 
 export type ServerMessage =
@@ -259,6 +285,17 @@ export type ServerMessage =
       snapshot: RoomSnapshot;
       timing: RoomTiming;
       chat: ChatSnapshot;
+    }
+  | {
+      /** A watcher's equivalent of session.ready: no token, no mark, no slot. */
+      type: 'spectator.ready';
+      requestId: string;
+      roomCode: string;
+      spectatorId: string;
+      displayName: string;
+      capability: 'spectator';
+      snapshot: RoomSnapshot;
+      timing: RoomTiming;
     }
   | {
       /**

@@ -24,6 +24,8 @@ const snapshot = (overrides: Partial<RoomSnapshot> = {}): RoomSnapshot => ({
   isDraw: false,
   round: 1,
   players: [],
+  spectatorCount: 0,
+  spectatorPolicy: { chat: false },
   ...overrides,
 });
 

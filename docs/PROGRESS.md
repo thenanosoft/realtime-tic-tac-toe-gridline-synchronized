@@ -560,3 +560,27 @@ set to hold forever, is what tests rollback. Verified by running the suite twice
 Worth stating plainly: this is the second time a Playwright failure turned out to be the test's
 timing assumption rather than the product, and both times the fix was to remove the race rather
 than widen the timeout.
+
+---
+
+## 2026-10-08 — Phase 6 closed: spectators and capabilities
+
+Branch `phase/6-spectators`. **129 unit tests** (up from 120), all gates green. Protocol v4;
+`MIN_SUPPORTED_CLIENT_PROTOCOL` moves to 3 on the same reasoning as D-009.
+
+A spectator is a **connection, not a slot**. It holds no token and cannot resume, because there
+is no identity worth reclaiming — reconnecting simply means watching again. That is what keeps
+the capability a genuinely different thing rather than a player with permissions removed, and it
+is why it rests on the Phase 4 split between *holding a slot* and *being connected*.
+
+**Privacy is enforced on the wire, not in the UI.** With chat closed, a watcher's socket never
+carries the frame at all, so there is nothing for a patched client to reveal. The test reads the
+spectator's socket directly and asserts the message text appears nowhere in it — a policy checked
+in the client would be a suggestion.
+
+Two refusals worth their error codes: watching a room that still has an open seat is
+`ROOM_NOT_FULL` ("join it instead"), and a spectator command is `FORBIDDEN` with "you are
+watching this room" rather than the previous `NOT_IN_ROOM`, which was both confusing and untrue.
+
+A full room is no longer a dead end in the lobby — it offers to watch instead. Offered rather
+than done automatically, because watching is a different thing from playing and should be chosen.

@@ -1,9 +1,8 @@
-import type { StoredSession } from '../lib/session';
 import type { RoomSnapshot } from '../../shared/protocol';
 
-export function GameStatus({ snapshot, session, onRematch }: { snapshot: RoomSnapshot; session: StoredSession; onRematch(): void }) {
-  const self = snapshot.players.find((player) => player.id === session.playerId);
-  const opponent = snapshot.players.find((player) => player.id !== session.playerId);
+export function GameStatus({ snapshot, viewerId, onRematch }: { snapshot: RoomSnapshot; viewerId: string; onRematch(): void }) {
+  const self = snapshot.players.find((player) => player.id === viewerId);
+  const opponent = snapshot.players.find((player) => player.id !== viewerId);
   const yourTurn = snapshot.phase === 'active' && snapshot.turn === self?.mark;
   const complete = snapshot.phase === 'game_over' || snapshot.phase === 'rematch_waiting';
 

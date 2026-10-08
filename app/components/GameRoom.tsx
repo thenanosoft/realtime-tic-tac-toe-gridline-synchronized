@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MessageReaction, QuickReaction, RoomSnapshot, RoomTiming, StickerId } from '../../shared/protocol';
 import { canPlay, type Speculation } from '../lib/speculation';
-import type { StoredSession } from '../lib/session';
+import type { Mark } from '../../shared/game';
+import type { Capability } from '../../shared/protocol';
 import type { ClientChatMessage, ConnectionState, QuickReactionPopup } from '../hooks/useGameSocket';
 import { PlayerCard } from './PlayerCard';
 import { GameBoard } from './GameBoard';
@@ -15,7 +16,12 @@ import { ChatPanel } from './ChatPanel';
 interface GameRoomProps {
   snapshot: RoomSnapshot;
   timing: RoomTiming | null;
-  session: StoredSession;
+  /** The player id, or the spectator id when watching. */
+  viewerId: string;
+  /** Board orientation when this viewer holds no mark of their own. */
+  fallbackMark: Mark;
+  capability: Capability;
+  onSpectatorChat(allowed: boolean): void;
   connection: ConnectionState;
   resyncing: boolean;
   speculation: Speculation | null;
@@ -40,7 +46,10 @@ interface GameRoomProps {
 export function GameRoom({
   snapshot,
   timing,
-  session,
+  viewerId,
+  fallbackMark,
+  capability,
+  onSpectatorChat,
   connection,
   resyncing,
   speculation,
@@ -68,13 +77,16 @@ export function GameRoom({
   const lastChatIdRef = useRef<string | null>(null);
   const xPlayer = snapshot.players.find((player) => player.mark === 'X');
   const oPlayer = snapshot.players.find((player) => player.mark === 'O');
-  const self = snapshot.players.find((player) => player.id === session.playerId);
+  const self = snapshot.players.find((player) => player.id === viewerId);
   // Every condition that gates acting lives in one pure function, shared with
   // the chaos simulation. `connected` alone is not enough: it flips the instant
   // the socket opens, while the board still holds whatever was true before the
   // drop; and an outstanding speculation must block a second move, or a player
   // could place two marks against a board the server has not confirmed.
-  const canMove = canPlay({
+  const watching = capability === 'spectator';
+  const host = snapshot.players.find((player) => player.isHost);
+  const isHost = host?.id === viewerId;
+  const canMove = !watching && canPlay({
     connected: connection === 'connected',
     resyncing,
     hasControl,
@@ -122,11 +134,11 @@ export function GameRoom({
     }
     if (last.id === lastChatIdRef.current) return;
     lastChatIdRef.current = last.id;
-    if (!chatOpen && last.senderId !== session.playerId) {
+    if (!chatOpen && last.senderId !== viewerId) {
       const frame = requestAnimationFrame(() => setUnread((current) => current + 1));
       return () => cancelAnimationFrame(frame);
     }
-  }, [chatMessages, chatOpen, session.playerId]);
+  }, [chatMessages, chatOpen, viewerId]);
 
   const openChat = () => {
     setChatOpen(true);
@@ -155,7 +167,36 @@ export function GameRoom({
 
   return (
     <section className={`room-shell scene-${sceneState} ${chatOpen ? 'chat-open' : ''} ${hasControl ? '' : 'is-readonly'}`}>
-      {!hasControl && (
+      {watching && (
+        // A watcher is told plainly what they are, rather than being handed a
+        // board that silently refuses every click.
+        <div className="control-banner spectator-banner" role="status">
+          <span aria-hidden="true">◉</span>
+          <p>
+            <strong>You are watching this room.</strong>
+            {snapshot.spectatorPolicy.chat
+              ? ' The players have opened their conversation to watchers.'
+              : ' The conversation between the players stays private.'}
+          </p>
+        </div>
+      )}
+      {!watching && isHost && snapshot.spectatorCount > 0 && (
+        <div className="control-banner host-policy" role="group" aria-label="Spectator policy">
+          <span aria-hidden="true">◉</span>
+          <p>
+            <strong>
+              {snapshot.spectatorCount} {snapshot.spectatorCount === 1 ? 'person is' : 'people are'} watching.
+            </strong>
+            {snapshot.spectatorPolicy.chat
+              ? ' They can see your conversation.'
+              : ' Your conversation stays between the two of you.'}
+          </p>
+          <button className="claim-control" onClick={() => onSpectatorChat(!snapshot.spectatorPolicy.chat)}>
+            {snapshot.spectatorPolicy.chat ? 'Make chat private' : 'Let them chat'}
+          </button>
+        </div>
+      )}
+      {!hasControl && !watching && (
         // Said in words, not implied by a dead board. The window is still fully
         // live - it just is not the one holding the slot (D-002).
         <div className="control-banner" role="status">
@@ -176,11 +217,11 @@ export function GameRoom({
             <h1>Room <b>{snapshot.roomCode}</b></h1>
           </div>
           <div className="room-actions">
-            <button className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
+            {!watching && <button className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
               <span aria-hidden="true">⌁</span>
               <span className="btn-label">Chat</span>
               {unread > 0 && <b aria-label={`${unread} unread messages`}>{unread}</b>}
-            </button>
+            </button>}
             <button className={`copy-room ${copied ? 'copied' : ''}`} onClick={copyCode} aria-label={`Copy invitation link for room ${snapshot.roomCode}`}>
               <span className="copy-icon" aria-hidden="true" />{copied ? 'Copied' : 'Copy invite'}
             </button>
@@ -195,13 +236,13 @@ export function GameRoom({
 
         <div className="arena">
           <div className="arena-axis" aria-hidden="true"><i /><span>SHARED PLANE</span><i /></div>
-          <div className="player-x-area"><PlayerCard mark="X" player={xPlayer} isSelf={xPlayer?.id === session.playerId} snapshot={snapshot} /></div>
+          <div className="player-x-area"><PlayerCard mark="X" player={xPlayer} isSelf={xPlayer?.id === viewerId} snapshot={snapshot} /></div>
           <div className="board-area">
             <div className="board-frame">
               <div className="board-meta"><span>01 / SERVER-AUTHORITATIVE</span><span>SYNC {String(snapshot.revision).padStart(3, '0')}</span></div>
               <GameBoard
                 snapshot={snapshot}
-                myMark={self?.mark ?? session.mark}
+                myMark={self?.mark ?? fallbackMark}
                 interactive={canMove}
                 speculation={speculation}
                 onMove={onMove}
@@ -216,18 +257,18 @@ export function GameRoom({
                 })}
               </div>
             </div>
-            <GameStatus snapshot={snapshot} session={session} onRematch={onRematch} />
+            <GameStatus snapshot={snapshot} viewerId={viewerId} onRematch={onRematch} />
           </div>
-          <div className="player-o-area"><PlayerCard mark="O" player={oPlayer} isSelf={oPlayer?.id === session.playerId} snapshot={snapshot} /></div>
+          <div className="player-o-area"><PlayerCard mark="O" player={oPlayer} isSelf={oPlayer?.id === viewerId} snapshot={snapshot} /></div>
         </div>
       </div>
       <div id="private-chat">
-        <ChatPanel
+        {!watching && <ChatPanel
           open={chatOpen}
           unread={unread}
           messages={chatMessages}
           players={snapshot.players}
-          selfId={session.playerId}
+          selfId={viewerId}
           connected={connection === 'connected'}
           typingPlayerId={typingPlayerId}
           imagePreparing={imagePreparing}
@@ -238,7 +279,7 @@ export function GameRoom({
           onQuickReaction={onQuickReaction}
           onMessageReaction={onMessageReaction}
           onImage={onImage}
-        />
+        />}
       </div>
     </section>
   );

@@ -24,6 +24,8 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'game.move',
   'rematch.vote',
   'session.claim',
+  'room.spectate',
+  'room.policy',
   'chat.message',
   'chat.typing',
   'chat.quick-reaction',
@@ -281,6 +283,14 @@ function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): voi
       return;
     case 'session.claim':
       manager.claimControl(peer.id, message.requestId);
+      return;
+    case 'room.spectate': {
+      const watching = manager.spectateRoom(message.roomCode, peer);
+      peer.send({ type: 'spectator.ready', requestId: message.requestId, capability: 'spectator', ...watching });
+      return;
+    }
+    case 'room.policy':
+      manager.setSpectatorPolicy(peer.id, message.requestId, message.spectatorChat);
       return;
     case 'chat.message':
       manager.sendChatMessage(peer.id, message.requestId, message.text);

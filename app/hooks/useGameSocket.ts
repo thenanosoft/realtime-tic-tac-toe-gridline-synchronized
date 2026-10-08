@@ -71,6 +71,7 @@ export function useGameSocket() {
   const [timing, setTiming] = useState<RoomTiming | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [lobbyBusy, setLobbyBusy] = useState(false);
+  const [fullRoomCode, setFullRoomCode] = useState<string | null>(null);
   /**
    * The move this client is showing but the server has not confirmed.
    *
@@ -94,6 +95,12 @@ export function useGameSocket() {
    * attached as a read-only view and can claim the slot back (D-002). Starts
    * true so a fresh session is playable before any control message arrives.
    */
+  /**
+   * Watching rather than playing. Deliberately not folded into `session`: a
+   * spectator holds no token and cannot resume, so giving it a session shape
+   * would invite code to treat it as one.
+   */
+  const [spectator, setSpectator] = useState<{ roomCode: string; spectatorId: string; displayName: string } | null>(null);
   const [hasControl, setHasControl] = useState(true);
   const [controlReason, setControlReason] = useState<'GRANTED' | 'DISPLACED' | 'RESUMED' | 'RECLAIMED' | null>(null);
   const [chatMessages, setChatMessages] = useState<ClientChatMessage[]>([]);
@@ -112,6 +119,7 @@ export function useGameSocket() {
   const typingSequenceRef = useRef(new Map<string, number>());
   const reactionSequenceRef = useRef(new Map<string, number>());
   const protocolBlockedRef = useRef(false);
+  const lastJoinAttemptRef = useRef<string | null>(null);
   const chaosFactoryRef = useRef<((url: string) => WebSocket) | null>(null);
   const reconnectAttemptRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -271,6 +279,7 @@ export function useGameSocket() {
     setLobbyBusy(false);
     speculationRef.current = null;
     setSpeculation(null);
+    setSpectator(null);
     setSession(null);
     setSnapshot(null);
     setTiming(null);
@@ -309,6 +318,12 @@ export function useGameSocket() {
       case 'game.snapshot':
         acceptSnapshot(message.snapshot, message.timing);
         return;
+      case 'spectator.ready': {
+        setLobbyBusy(false);
+        setSpectator({ roomCode: message.roomCode, spectatorId: message.spectatorId, displayName: message.displayName });
+        acceptSnapshot(message.snapshot, message.timing);
+        return;
+      }
       case 'session.control':
         setHasControl(message.hasControl);
         setControlReason(message.reason);
@@ -354,6 +369,9 @@ export function useGameSocket() {
       case 'command.rejected': {
         setLobbyBusy(false);
         setResyncing(false);
+        // A full room is not an error to a would-be watcher: remember the code so
+        // the lobby can offer to spectate instead of just saying no.
+        if (message.code === 'ROOM_FULL') setFullRoomCode(lastJoinAttemptRef.current);
         // A rejection of the speculative move rolls it back and carries the
         // server's own reason, which is more useful than a generic one. Routed
         // through settleSpeculation so the notice is not raised twice.
@@ -542,6 +560,8 @@ export function useGameSocket() {
       return;
     }
     setLobbyBusy(true);
+    lastJoinAttemptRef.current = cleanCode;
+    setFullRoomCode(null);
     if (!send({ type: 'room.join', requestId: requestId(), roomCode: cleanCode })) setLobbyBusy(false);
   }, [send]);
 
@@ -582,6 +602,17 @@ export function useGameSocket() {
 
   const claimControl = useCallback(() => {
     send({ type: 'session.claim', requestId: requestId() });
+  }, [send]);
+
+  const spectateRoom = useCallback((roomCode: string) => {
+    const clean = roomCode.trim().toUpperCase();
+    if (clean.length !== 6) return;
+    setLobbyBusy(true);
+    if (!send({ type: 'room.spectate', requestId: requestId(), roomCode: clean })) setLobbyBusy(false);
+  }, [send]);
+
+  const setSpectatorChat = useCallback((allowed: boolean) => {
+    send({ type: 'room.policy', requestId: requestId(), spectatorChat: allowed });
   }, [send]);
 
   const sendChatMessage = useCallback((text: string): boolean => {
@@ -638,6 +669,9 @@ export function useGameSocket() {
     session,
     snapshot,
     timing,
+    spectator,
+    spectateRoom,
+    setSpectatorChat,
     speculation,
     resyncing,
     hasControl,
@@ -645,6 +679,7 @@ export function useGameSocket() {
     claimControl,
     notice,
     lobbyBusy,
+    fullRoomCode,
     chatMessages,
     typingPlayerId,
     quickReactions,

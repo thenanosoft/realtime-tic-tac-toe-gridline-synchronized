@@ -6,11 +6,14 @@ import type { ConnectionState } from '../hooks/useGameSocket';
 interface LobbyProps {
   connection: ConnectionState;
   busy: boolean;
+  /** Set when a join was refused because the room already has two players. */
+  fullRoomCode: string | null;
   onCreate(): void;
   onJoin(code: string): void;
+  onSpectate(code: string): void;
 }
 
-export function Lobby({ connection, busy, onCreate, onJoin }: LobbyProps) {
+export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpectate }: LobbyProps) {
   const [code, setCode] = useState('');
   const unavailable = connection !== 'connected' || busy;
 
@@ -54,6 +57,15 @@ export function Lobby({ connection, busy, onCreate, onJoin }: LobbyProps) {
             <button className="join-button" disabled={unavailable}>Join</button>
           </form>
         </div>
+        {fullRoomCode && (
+          // A full room is not a dead end. Offered rather than done automatically:
+          // watching is a different thing from playing and should be chosen.
+          <p className="spectate-offer">
+            <span aria-hidden="true">◉</span>
+            Room <b>{fullRoomCode}</b> already has two players.
+            <button onClick={() => onSpectate(fullRoomCode)} disabled={unavailable}>Watch instead</button>
+          </p>
+        )}
         <p className="privacy-note"><span aria-hidden="true">⌁</span> No account · Ephemeral chat · Just this session</p>
       </div>
 

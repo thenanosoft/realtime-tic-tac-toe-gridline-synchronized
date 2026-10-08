@@ -30,14 +30,24 @@ export function GameApp() {
         </div>
       </header>
 
-      {!game.session && (
-        <Lobby connection={game.connection} busy={game.lobbyBusy} onCreate={game.createRoom} onJoin={game.joinRoom} />
+      {!game.session && !game.spectator && (
+        <Lobby
+          connection={game.connection}
+          busy={game.lobbyBusy}
+          fullRoomCode={game.fullRoomCode}
+          onCreate={game.createRoom}
+          onJoin={game.joinRoom}
+          onSpectate={game.spectateRoom}
+        />
       )}
-      {game.session && game.snapshot && (
+      {(game.session || game.spectator) && game.snapshot && (
         <GameRoom
           snapshot={game.snapshot}
           timing={game.timing}
-          session={game.session}
+          viewerId={game.session?.playerId ?? game.spectator?.spectatorId ?? ''}
+          fallbackMark={game.session?.mark ?? 'X'}
+          capability={game.session ? 'player' : 'spectator'}
+          onSpectatorChat={game.setSpectatorChat}
           connection={game.connection}
           resyncing={game.resyncing}
           speculation={game.speculation}
@@ -59,7 +69,7 @@ export function GameApp() {
           onLeave={game.leaveRoom}
         />
       )}
-      {game.session && !game.snapshot && (
+      {game.session && !game.spectator && !game.snapshot && (
         <section className="restoring" role="status">
           <span className="waiting-rings" aria-hidden="true"><i /><i /><i /></span>
           <p>Restoring room <b>{game.session.roomCode}</b></p>

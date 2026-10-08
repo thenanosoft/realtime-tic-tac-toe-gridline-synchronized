@@ -13,6 +13,7 @@ import {
   type QuickReaction,
   type PresenceState,
   type RoomPhase,
+  type SpectatorPolicy,
   type RoomSnapshot,
   type RoomTiming,
   type ServerMessage,
@@ -86,6 +87,12 @@ interface Player {
   rateLimits: Record<RateBucket, number[]>;
 }
 
+interface Spectator {
+  id: string;
+  peer: Peer;
+  name: string;
+}
+
 interface StoredChatBase {
   id: string;
   requestId: string;
@@ -121,6 +128,12 @@ interface Room {
    * token model in Phase 6 - but the migration has to exist first.
    */
   hostPlayerId: string;
+  /**
+   * Watchers, keyed by connection. A spectator is a connection, not a slot:
+   * there is no identity to reclaim and nothing to resume, so it holds no token.
+   */
+  spectators: Map<string, Spectator>;
+  spectatorPolicy: SpectatorPolicy;
   revision: number;
   chatSequence: number;
   round: number;
@@ -145,6 +158,14 @@ export interface RoomManagerOptions {
   now?: () => number;
 }
 
+export interface SpectatorResult {
+  roomCode: string;
+  spectatorId: string;
+  displayName: string;
+  snapshot: RoomSnapshot;
+  timing: RoomTiming;
+}
+
 export interface SessionResult {
   roomCode: string;
   playerToken: string;
@@ -160,6 +181,7 @@ export interface SessionResult {
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
   private readonly connectionIndex = new Map<string, { roomCode: string; playerId: string }>();
+  private readonly spectatorIndex = new Map<string, { roomCode: string; spectatorId: string }>();
   private readonly countdownMs: number;
   private readonly reconnectGraceMs: number;
   private readonly emptyRoomTtlMs: number;
@@ -196,6 +218,10 @@ export class RoomManager {
       pausedFrom: null,
       rematchVotes: new Set(),
       hostPlayerId: player.id,
+      spectators: new Map(),
+      // Off by default. A private room that silently broadcast its conversation
+      // to anyone holding the code would be a privacy failure, not a feature.
+      spectatorPolicy: { chat: false },
       revision: 1,
       chatSequence: 0,
       round: 1,
@@ -276,6 +302,10 @@ export class RoomManager {
    * in it, and whoever joins the freed slot next must not be able to read it.
    */
   leaveRoom(peerId: string): void {
+    // A watcher leaving is just a detach - no slot to free, no host to migrate.
+    if (this.stopSpectating(peerId)) {
+      return;
+    }
     const { room, player } = this.requireControl(peerId);
 
     for (const peer of player.connections.values()) {
@@ -310,6 +340,72 @@ export class RoomManager {
     room.rematchVotes.clear();
     this.bump(room);
     this.broadcastGame(room);
+  }
+
+  /**
+   * Attaches a watcher to a room that is already full.
+   *
+   * A spectator holds no token and cannot resume: there is no identity worth
+   * reclaiming, so reconnecting simply means spectating again. That is what
+   * keeps the capability genuinely separate from a player slot rather than a
+   * player with fewer permissions.
+   */
+  spectateRoom(code: string, peer: Peer): SpectatorResult {
+    if (this.connectionIndex.has(peer.id) || this.spectatorIndex.has(peer.id)) {
+      throw new CommandError('ALREADY_IN_ROOM', 'This connection already belongs to a room.');
+    }
+    const room = this.requireRoom(code);
+    if (room.players.size < 2) {
+      throw new CommandError('ROOM_NOT_FULL', 'This room still has an open seat. Join it instead of watching.');
+    }
+    const taken = new Set([
+      ...[...room.players.values()].map((player) => player.name),
+      ...[...room.spectators.values()].map((spectator) => spectator.name),
+    ]);
+    const spectator: Spectator = { id: randomUUID(), peer, name: generateTemporaryName(taken) };
+    room.spectators.set(peer.id, spectator);
+    this.spectatorIndex.set(peer.id, { roomCode: room.code, spectatorId: spectator.id });
+    this.bump(room);
+    this.broadcastGame(room);
+    return {
+      roomCode: room.code,
+      spectatorId: spectator.id,
+      displayName: spectator.name,
+      snapshot: this.snapshot(room),
+      timing: this.timing(room),
+    };
+  }
+
+  /**
+   * Host-only. Opens or closes the conversation to watchers.
+   *
+   * Enforced on the wire, not in the UI: with chat closed, a spectator's socket
+   * never carries a message at all, so there is nothing to reveal by inspecting
+   * the client.
+   */
+  setSpectatorPolicy(peerId: string, requestId: string, chat: boolean): void {
+    const { room, player } = this.requireControl(peerId);
+    if (room.hostPlayerId !== player.id) {
+      throw new CommandError('FORBIDDEN', 'Only the room host can change who may chat.');
+    }
+    if (this.recall(player, requestId)) return;
+    this.remember(player, requestId, { kind: 'silent' });
+    room.spectatorPolicy = { chat };
+    this.bump(room);
+    this.broadcastGame(room);
+  }
+
+  /** Detaches a watcher. Returns false when the peer was not spectating. */
+  stopSpectating(peerId: string): boolean {
+    const indexed = this.spectatorIndex.get(peerId);
+    if (!indexed) return false;
+    this.spectatorIndex.delete(peerId);
+    const room = this.rooms.get(indexed.roomCode);
+    if (!room) return true;
+    room.spectators.delete(peerId);
+    this.bump(room);
+    this.broadcastGame(room);
+    return true;
   }
 
   /**
@@ -500,6 +596,7 @@ export class RoomManager {
   }
 
   disconnect(peerId: string): void {
+    if (this.stopSpectating(peerId)) return;
     const indexed = this.connectionIndex.get(peerId);
     if (!indexed) return;
     this.connectionIndex.delete(peerId);
@@ -561,6 +658,7 @@ export class RoomManager {
 
   close(): void {
     clearInterval(this.cleanupTimer);
+    this.spectatorIndex.clear();
     for (const code of [...this.rooms.keys()]) {
       this.destroyRoom(code, 'SERVER_SHUTDOWN', 'The realtime service is restarting.');
     }
@@ -586,6 +684,12 @@ export class RoomManager {
       player.connections.clear();
       player.controllingPeerId = null;
     }
+
+    for (const spectator of room.spectators.values()) {
+      this.spectatorIndex.delete(spectator.peer.id);
+      spectator.peer.send({ type: 'session.ended', reason, message });
+    }
+    room.spectators.clear();
 
     for (const chatMessage of room.chatMessages) {
       chatMessage.reactions.clear();
@@ -727,10 +831,15 @@ export class RoomManager {
     // Every attached window, not only the controlling one: a read-only view
     // showing a stale board would be worse than no view at all.
     for (const player of room.players.values()) this.sendToPlayer(player, message);
+    for (const spectator of room.spectators.values()) spectator.peer.send(message);
   }
 
   private broadcastChat(room: Room, message: ServerMessage): void {
     for (const player of room.players.values()) this.sendToPlayer(player, message);
+    // Withheld at the source unless the host has opened it. A spectator that is
+    // simply not sent the frame cannot reveal it however the client is patched.
+    if (!room.spectatorPolicy.chat) return;
+    for (const spectator of room.spectators.values()) spectator.peer.send(message);
   }
 
   /**
@@ -748,6 +857,8 @@ export class RoomManager {
       winningLine: room.game.winningLine ? [...room.game.winningLine] : null,
       isDraw: room.game.isDraw,
       round: room.round,
+      spectatorCount: room.spectators.size,
+      spectatorPolicy: { ...room.spectatorPolicy },
       players: [...room.players.values()]
         .sort((a, b) => a.mark.localeCompare(b.mark))
         .map((player) => ({
@@ -859,6 +970,11 @@ export class RoomManager {
 
   /** Attachment only. Does not imply the caller may act - see requireControl. */
   private requireMembership(peerId: string): { room: Room; player: Player; peer: Peer } {
+    // A spectator is in a room, just not as a player. Saying so is more useful
+    // than "not in room", which is both confusing and untrue.
+    if (this.spectatorIndex.has(peerId)) {
+      throw new CommandError('FORBIDDEN', 'You are watching this room. Only the two players can act.');
+    }
     const indexed = this.connectionIndex.get(peerId);
     if (!indexed) throw new CommandError('NOT_IN_ROOM', 'Join a room before sending game commands.');
     const room = this.rooms.get(indexed.roomCode);
