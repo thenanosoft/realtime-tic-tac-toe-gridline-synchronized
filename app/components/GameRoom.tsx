@@ -11,6 +11,8 @@ import type {
   TurnLimitMs,
 } from '../../shared/protocol';
 import { canPlay, type Speculation } from '../lib/speculation';
+import { deriveArena } from '../../shared/identityArt';
+import { REACTION_SIZE, reactionPath } from '../lib/reactionPath';
 import type { Cell, Mark } from '../../shared/game';
 import type { Capability } from '../../shared/protocol';
 import type { ClientChatMessage, ConnectionState, QuickReactionPopup } from '../hooks/useGameSocket';
@@ -175,6 +177,17 @@ export function GameRoom({
    * nothing to unwind. An effect that cleared the step would have had to race
    * the snapshot that invalidated it.
    */
+  /**
+   * Arena variation from both names, so the room belongs to the match rather
+   * than to whoever opened it. Bounded hard in deriveArena: the brief is
+   * subtle, and the tempting change later is to widen the ranges until two
+   * rooms stop looking like one product.
+   */
+  const arena = useMemo(
+    () => deriveArena(snapshot.players.map((player) => player.name)),
+    [snapshot.players],
+  );
+
   const replayable = snapshot.phase === 'game_over' || snapshot.phase === 'rematch_waiting';
   const replaying = replayable && replayStep !== null && replayStep <= snapshot.moves.length;
   const replayBoard = useMemo(() => {
@@ -202,7 +215,16 @@ export function GameRoom({
   };
 
   return (
-    <section className={`room-shell scene-${sceneState} ${chatOpen ? 'chat-open' : ''} ${hasControl ? '' : 'is-readonly'}`}>
+    <section
+      className={`room-shell scene-${sceneState} ${chatOpen ? 'chat-open' : ''} ${hasControl ? '' : 'is-readonly'}`}
+      style={{
+        ['--arena-angle']: `${arena.angle}deg`,
+        ['--arena-drift-x']: `${arena.driftX}%`,
+        ['--arena-drift-y']: `${arena.driftY}%`,
+        ['--arena-intensity']: String(arena.intensity),
+        ['--arena-hue']: `${arena.hueShift}deg`,
+      } as React.CSSProperties}
+    >
       {watching && (
         // A watcher is told plainly what they are, rather than being handed a
         // board that silently refuses every click.
@@ -326,7 +348,27 @@ export function GameRoom({
               <div className="reaction-popups" aria-live="polite">
                 {quickReactions.map((reaction) => {
                   const mark = snapshot.players.find((player) => player.id === reaction.senderId)?.mark ?? 'X';
-                  return <span key={reaction.id} className={`reaction-popup reaction-${mark.toLowerCase()}`}>{reaction.reaction}</span>;
+                  const side = mark === 'X' ? 'x' : 'o';
+                  // Positioned from the same function the geometry test proves
+                  // clears the cells, rather than from a keyframe nobody can
+                  // check (P10-06). CSS animates between the two endpoints.
+                  const start = reactionPath(0.08, side);
+                  const end = reactionPath(1, side);
+                  return (
+                    <span
+                      key={reaction.id}
+                      className={`reaction-popup reaction-${side} from-${side}`}
+                      style={{
+                        ['--from-x']: `${start.x * 100}%`,
+                        ['--from-y']: `${start.y * 100}%`,
+                        ['--to-x']: `${end.x * 100}%`,
+                        ['--to-y']: `${end.y * 100}%`,
+                        ['--glyph-size']: `${REACTION_SIZE * 100}%`,
+                      } as React.CSSProperties}
+                    >
+                      {reaction.reaction}
+                    </span>
+                  );
                 })}
               </div>
             </div>

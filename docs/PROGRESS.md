@@ -716,3 +716,38 @@ round-one snapshot and the test raced ahead of the move it was waiting for. The 
 wait only on frames that arrived after the send. This is the third time this shape has appeared
 (the e2e suite hit it in Phase 5), which is a sign the helper should have carried a cursor from
 the start.
+
+---
+
+## 2026-10-08 — Phase 10 closed: identity with no protocol and no storage
+
+Branch `phase/10-identity-and-arena`. **199 unit tests** (up from 184). **No protocol change** —
+which is the most interesting thing about the phase.
+
+Every player already has a server-issued temporary name. Making that name the seed means the
+accent, the symbol and the sigil are a pure function of something both clients already hold, so
+the whole feature needs nothing on the wire and has no skew window to manage between the two
+deploys. It also means nothing is stored: the identity is recomputed from the name every time, so
+there is no identity record to persist, leak or expire. The alternative was the player id, which
+has more entropy and is invisible to the player; the name wins because the identity then visibly
+belongs to the thing the player is shown.
+
+**The palette is fixed rather than generated, on purpose.** Random hues were the obvious
+implementation. But the colour also labels a player, so a hue that lands unreadable is an identity
+that lands unreadable — and the test now computes contrast for all twelve accents against the
+application ground. Generated colour would have made that assertion impossible to write.
+
+**Textual parity is a data property, not a UI one.** Every accent has a name and every symbol a
+label, and the description built from both is what the sigil announces. That is checked for all
+480 names the server can issue, so the visual can never become the only carrier of identity.
+
+**The reaction path is arithmetic because the requirement is a proof.** "Never occludes a playable
+cell" cannot be established by looking at a keyframe. So the path is a function in board widths,
+and the test walks a thousand points along it for both sides and asserts the whole glyph box
+clears the 3×3 region with margin. Progress is clamped, which matters: a timer overrunning by a
+frame would otherwise fling the glyph across the board.
+
+**One real bug, found by testing the whole input space.** `^` in JavaScript yields a *signed*
+32-bit integer, so the hash mixer returned a negative remainder for about half of all seeds — a
+negative array index and an `undefined` accent. A spot check on three names would have passed half
+the time. Asserting over all 480 names failed immediately and unambiguously.

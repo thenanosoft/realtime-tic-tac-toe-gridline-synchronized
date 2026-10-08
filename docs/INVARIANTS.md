@@ -167,3 +167,19 @@ endpoint, or backend down.
 
 *Defended by:* `P11-09`.
 *How it breaks:* a service worker serving a cached shell that renders the lobby as if live.
+
+### INV-15 — Identity is textual first
+Every generated visual has a name and a description, and the description is what assistive
+technology receives. Colour is never the only thing distinguishing two players.
+
+*Defended by:* `P10-03`, and the contrast assertion over the whole accent palette.
+*How it breaks:* generating a hue instead of choosing a named accent, which removes both the name
+and the ability to assert that it can be read.
+
+### INV-16 — Nothing animates over a playable cell
+The reaction path keeps its entire glyph clear of the 3×3 region, at every point along it, on
+every screen size.
+
+*Defended by:* `P10-06`, which walks the path rather than inspecting a keyframe.
+*How it breaks:* moving the path into CSS keyframes, where the claim stops being checkable; or
+widening the board without revisiting the clearance.

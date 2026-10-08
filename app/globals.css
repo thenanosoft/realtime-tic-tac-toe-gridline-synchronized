@@ -1472,3 +1472,83 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .match-panel { margin-bottom: 11px; padding: 10px 12px; }
   .turn-clock { bottom: -12px; }
 }
+
+/* --- Generated identity and procedural arena (Phase 10) ------------------ */
+
+/* Variation applied as a transform and an opacity multiplier on light that is
+   already there, rather than as new colour. The ranges are bounded in
+   deriveArena so two rooms stay recognisably the same product. */
+.room-shell .arena-light {
+  opacity: calc(.055 * var(--arena-intensity, 1));
+  transform:
+    translate(var(--arena-drift-x, 0%), var(--arena-drift-y, 0%))
+    rotate(var(--arena-angle, 0deg));
+  filter: blur(75px) hue-rotate(var(--arena-hue, 0deg));
+}
+
+.identity-block { display: flex; align-items: center; gap: 9px; margin: 0 0 9px; }
+.identity-sigil {
+  flex: 0 0 auto;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--line-faint);
+  border-radius: 7px;
+  padding: 3px;
+  background: rgba(255, 255, 255, .02);
+}
+/* The words are not a caption for the sigil, they are the identity. The sigil
+   is the enhancement (P10-03). */
+.identity-words { color: #b6b5af; font-size: var(--text-micro); font-weight: 600; letter-spacing: .1em; text-transform: uppercase; }
+.player-card.is-active .identity-words { color: var(--accent, #b6b5af); }
+
+/* Reactions travel beside the board, never across it.
+   The container is the board frame, which is at least as large as the board
+   and holds it centred - so a glyph placed at a negative percentage, or past
+   100%, is outside the frame and therefore outside the 3x3 region. The numbers
+   come from reactionPath, where the clearance is asserted by test (P10-06). */
+.reaction-popups {
+  position: absolute;
+  inset: 0;
+  z-index: 12;
+  overflow: visible;
+  border-radius: 0;
+  pointer-events: none;
+}
+.reaction-popup {
+  position: absolute;
+  left: var(--from-x);
+  top: var(--from-y);
+  width: var(--glyph-size);
+  display: grid;
+  place-items: center;
+  font-size: clamp(26px, 3.4vw, 42px);
+  line-height: 1;
+  filter: drop-shadow(0 12px 20px rgba(0, 0, 0, .42));
+  animation: reaction-travel 900ms var(--ease-cinema) both;
+}
+/* left and top rather than a transform: the path is expressed in board widths,
+   and two values interpolating between known endpoints is easier to reason
+   about than a translate whose basis changes with the element size. One or two
+   of these exist at a time, for under a second. */
+@keyframes reaction-travel {
+  0% { left: var(--from-x); top: var(--from-y); opacity: 0; transform: scale(.72); }
+  20% { opacity: 1; }
+  78% { opacity: 1; }
+  100% { left: var(--to-x); top: var(--to-y); opacity: 0; transform: scale(1.06); }
+}
+
+@media (max-width: 980px) {
+  /* The cards stack above and below the board here, so there is no room beside
+     it. The glyph rises from above the frame instead - still never over a
+     cell, which is the actual requirement. */
+  .reaction-popup {
+    left: 50%;
+    animation: reaction-rise 900ms var(--ease-cinema) both;
+  }
+  @keyframes reaction-rise {
+    0% { top: -4%; opacity: 0; transform: translateX(-50%) scale(.72); }
+    20% { opacity: 1; }
+    78% { opacity: 1; }
+    100% { top: -26%; opacity: 0; transform: translateX(-50%) scale(1.06); }
+  }
+}

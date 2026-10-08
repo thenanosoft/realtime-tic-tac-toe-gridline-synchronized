@@ -308,14 +308,34 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 10 — Generated identity and procedural arena
 
-- [ ] **P10-01** Deterministic identity generation: avatar, accent, symbol from the session seed.
-- [ ] **P10-02** Determinism test: same seed → identical identity.
-- [ ] **P10-03** Textual identity parity — every visual has a name and description; identity is
-      never visual-only.
-- [ ] **P10-04** Subtle procedural arena variation from both players' seeds, bounded so rooms
-      stay recognisably one product.
-- [ ] **P10-05** Reactions animate from the opponent's identity position toward the arena.
-- [ ] **P10-06** Test: the reaction path never occludes a playable cell.
+- [x] **P10-01** Accent, symbol and a 5×5 sigil, derived from the **player name** rather than
+      from the player id. Three consequences, all of them the point: both clients derive the same
+      identity with **nothing new on the wire** — this phase changes no protocol, so there is no
+      skew window between the two deploys (D-008); the identity visibly belongs to the name the
+      player is shown rather than to a hidden id; and nothing is stored, so there is no identity
+      record to persist, leak or expire.
+- [x] **P10-02** Asserted across all 480 names the server can issue, not on an example — which
+      is how the one real bug in this phase was found. `^` in JavaScript yields a *signed* 32-bit
+      integer, so the hash mixer produced a negative remainder for roughly half of all seeds, a
+      negative array index, and an `undefined` accent. Spot checks would have caught it half the
+      time.
+- [x] **P10-03** Every accent has a name and every symbol a label, and the description that
+      carries both is what the sigil announces as its `aria-label`. The palette is **fixed rather
+      than generated** precisely so contrast can be asserted: a random hue eventually produces an
+      identity colour that cannot be read, which is an identity that cannot be read.
+- [x] **P10-04** Derived from both names **sorted**, so the arena belongs to the match rather
+      than to whoever opened the room, and so the two players cannot see different rooms. The
+      bounds are declared as constants and asserted, because the tempting change later is to widen
+      them "just a little" until two rooms stop looking like one product.
+- [x] **P10-05** Reactions arrive from the sender's own side of the arena, positioned from
+      `reactionPath` — arithmetic in board widths, with CSS interpolating between the endpoints the
+      function returns.
+- [x] **P10-06** Proved rather than eyeballed. The path is a function, so the test walks a
+      thousand points along it for both sides and asserts the **whole glyph box** clears the 3×3
+      region with margin. Progress is clamped, so a timer that overruns by a frame cannot fling the
+      glyph across the board the way an unclamped interpolation would. On narrow screens the cards
+      stack and there is no room beside the board, so the glyph rises from above the frame instead
+      — still never over a cell, which is the actual requirement.
 
 ## Phase 11 — Accessibility, motion, mobile and PWA
 
