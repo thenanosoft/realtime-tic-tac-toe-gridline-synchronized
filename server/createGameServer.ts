@@ -14,6 +14,10 @@ import { CommandError } from './errors';
 import { RoomManager, type Peer, type RoomManagerOptions } from './rooms/RoomManager';
 
 const MAX_FRAME_BYTES = 2_050_000;
+/** Beyond this the receiver is behind: non-essential frames are dropped. */
+const SLOW_RECEIVER_BYTES = 1_000_000;
+/** Beyond this the connection is abandoned rather than buffered indefinitely. */
+const SLOW_RECEIVER_LIMIT_BYTES = 8_000_000;
 const RATE_WINDOW_MS = 10_000;
 const RATE_WINDOW_MESSAGES = 100;
 const KNOWN_MESSAGE_TYPES = new Set([
@@ -26,6 +30,9 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'session.claim',
   'room.spectate',
   'room.policy',
+  'chat.image.begin',
+  'chat.image.chunk',
+  'chat.image.cancel',
   'chat.message',
   'chat.typing',
   'chat.quick-reaction',
@@ -61,10 +68,26 @@ class SocketPeer implements Peer {
     private readonly socket: WebSocket,
   ) {}
 
+  /**
+   * Drops the frame when the receiver is too far behind (P7-05).
+   *
+   * Without this a slow reader grows the server's send queue without bound: the
+   * socket accepts everything and buffers it in process memory. Game snapshots
+   * are the one thing worth forcing through, because they are small and a
+   * client that misses one is left showing a stale board.
+   */
   send(message: ServerMessage): void {
-    if (this.socket.readyState === WebSocket.OPEN) {
-      this.socket.send(JSON.stringify(message));
+    if (this.socket.readyState !== WebSocket.OPEN) return;
+    if (this.socket.bufferedAmount > SLOW_RECEIVER_BYTES) {
+      if (this.socket.bufferedAmount > SLOW_RECEIVER_LIMIT_BYTES) {
+        // Beyond saving: this connection is costing more memory than it is
+        // worth, and the client's own reconnect path is the cheaper recovery.
+        this.socket.close(1013, 'Receiver too slow');
+        return;
+      }
+      if (message.type !== 'game.snapshot' && message.type !== 'session.ready') return;
     }
+    this.socket.send(JSON.stringify(message));
   }
 
   close(code: number, reason: string): void {
@@ -290,7 +313,16 @@ function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): voi
       return;
     }
     case 'room.policy':
-      manager.setSpectatorPolicy(peer.id, message.requestId, message.spectatorChat);
+      manager.setSpectatorPolicy(peer.id, message.requestId, message.spectatorChat, message.expireContent);
+      return;
+    case 'chat.image.begin':
+      manager.beginImageUpload(peer.id, message.requestId, message);
+      return;
+    case 'chat.image.chunk':
+      manager.pushImageChunk(peer.id, message.uploadId, message.index, message.data);
+      return;
+    case 'chat.image.cancel':
+      manager.cancelImageUpload(peer.id, message.uploadId);
       return;
     case 'chat.message':
       manager.sendChatMessage(peer.id, message.requestId, message.text);

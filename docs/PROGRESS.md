@@ -584,3 +584,41 @@ watching this room" rather than the previous `NOT_IN_ROOM`, which was both confu
 
 A full room is no longer a dead end in the lobby — it offers to watch instead. Offered rather
 than done automatically, because watching is a different thing from playing and should be chosen.
+
+---
+
+## 2026-10-08 — Phase 7 closed: chunked media, budgets and backpressure
+
+Branch `phase/7-media-and-memory`. **140 unit tests** (up from 129), all gates green. Protocol v5.
+
+The theme is that nothing unbounded may accumulate: not a partial upload, not a room's
+attachments, not the process total, and not a client's send queue.
+
+**Budget is reserved at `begin`, not at completion.** Charging only finished uploads would leave
+a dozen half-finished ones sitting in memory entirely unaccounted for — the exact shape of the
+leak the budget exists to prevent.
+
+**The process total is computed, not tracked.** A running counter drifts the first time a cleanup
+path forgets to decrement it, and the drift only surfaces much later as a refusal nobody can
+explain. Summing a handful of rooms costs nothing and cannot be wrong.
+
+**The idle timeout measures silence, not duration.** It restarts on every chunk, so a slow but
+live upload is not punished for being slow — only an abandoned one is collected.
+
+**Expiry is announced, not silent.** `chat.expired` carries the ids so clients revoke the blob
+URLs they hold. Without that the bytes outlive the server's copy inside the browser, which is
+precisely where the ephemerality claim would quietly become false.
+
+**Rate limiting got an axis it was missing.** The flat sliding window could not tell an
+enthusiastic player from a spammer: twelve messages in eight seconds throttled both. Phase 3 hit
+this for real when a paced 30-message test was cut off at 24. Token buckets separate the two —
+burst is what is forgiven, refill is what can be sustained forever.
+
+**Backpressure has two thresholds for a reason.** Past 1MB buffered, only game snapshots are
+forced through: they are small, and a client that misses one is left showing a stale board. Past
+8MB the connection is closed, because by then it costs more memory than it is worth and the
+client's own reconnect path is the cheaper recovery.
+
+One design note on testing: the attachment ceilings are injectable. Reaching a real limit is a
+better test than pushing ten megabytes of image data through a socket to prove a rule about
+arithmetic.

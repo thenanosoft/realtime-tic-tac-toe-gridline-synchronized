@@ -6,6 +6,7 @@ import {
   MAX_CHAT_TEXT_LENGTH,
   PROTOCOL_VERSION,
   ROOM_IMAGE_MEMORY_LIMIT,
+  UPLOAD_CHUNK_BYTES,
   type ChatMessageSnapshot,
   type ChatSnapshot,
   type ClientMessage,
@@ -107,6 +108,7 @@ export function useGameSocket() {
   const [typingPlayerId, setTypingPlayerId] = useState<string | null>(null);
   const [quickReactions, setQuickReactions] = useState<QuickReactionPopup[]>([]);
   const [imagePreparing, setImagePreparing] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{ uploadId: string; received: number; expected: number } | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const sessionRef = useRef<StoredSession | null>(null);
@@ -132,6 +134,7 @@ export function useGameSocket() {
   const typingTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const reactionTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const uploadGenerationRef = useRef(0);
+  const activeUploadRef = useRef<string | null>(null);
 
   const revokeMessageUrl = useCallback((messageId: string) => {
     const url = messageUrlsRef.current.get(messageId);
@@ -154,6 +157,8 @@ export function useGameSocket() {
     setTypingPlayerId(null);
     setQuickReactions([]);
     setImagePreparing(false);
+    setUploadProgress(null);
+    activeUploadRef.current = null;
   }, []);
 
   const toClientMessage = useCallback((message: ChatMessageSnapshot): ClientChatMessage | null => {
@@ -339,6 +344,22 @@ export function useGameSocket() {
       case 'chat.message':
         appendChatMessage(message.message);
         return;
+      case 'chat.expired': {
+        // Revoked, not just unlinked. Leaving the blob alive would keep the
+        // bytes in this browser long after the server released them, which is
+        // exactly where an ephemerality claim would quietly become false.
+        const ids = new Set(message.messageIds);
+        for (const id of ids) revokeMessageUrl(id);
+        setChatMessages((current) => current.filter((candidate) => !ids.has(candidate.id)));
+        return;
+      }
+      case 'upload.progress':
+        setUploadProgress(
+          message.received >= message.expected
+            ? null
+            : { uploadId: message.uploadId, received: message.received, expected: message.expected },
+        );
+        return;
       case 'chat.typing':
         updateTyping(message.playerId, message.isTyping, message.msRemaining, message.sequence);
         return;
@@ -410,7 +431,7 @@ export function useGameSocket() {
       case 'presence.pong':
         return;
     }
-  }, [acceptSnapshot, appendChatMessage, endLocalSession, replaceChat, settleSpeculation, updateTyping]);
+  }, [acceptSnapshot, appendChatMessage, endLocalSession, replaceChat, revokeMessageUrl, settleSpeculation, updateTyping]);
 
   useEffect(() => {
     stoppedRef.current = false;
@@ -648,7 +669,39 @@ export function useGameSocket() {
     try {
       const prepared = await prepareChatImage(file);
       if (generation !== uploadGenerationRef.current || playerId !== sessionRef.current?.playerId) return false;
-      return send({ type: 'chat.image', requestId: requestId(), ...prepared });
+
+      // Bounded frames rather than one giant payload: a 1.5MB image used to go
+      // out as a single WebSocket message, which the server had to accept whole
+      // before it could judge it.
+      const uploadId = crypto.randomUUID();
+      const chunkCount = Math.max(1, Math.ceil(prepared.data.length / UPLOAD_CHUNK_BYTES));
+      activeUploadRef.current = uploadId;
+      const opened = send({
+        type: 'chat.image.begin',
+        requestId: requestId(),
+        uploadId,
+        mime: prepared.mime,
+        width: prepared.width,
+        height: prepared.height,
+        byteLength: prepared.byteLength,
+        chunks: chunkCount,
+      });
+      if (!opened) {
+        activeUploadRef.current = null;
+        return false;
+      }
+      for (let index = 0; index < chunkCount; index += 1) {
+        // A cancel between chunks stops the send immediately rather than
+        // finishing the upload and discarding it afterwards.
+        if (activeUploadRef.current !== uploadId) return false;
+        const slice = prepared.data.slice(index * UPLOAD_CHUNK_BYTES, (index + 1) * UPLOAD_CHUNK_BYTES);
+        if (!send({ type: 'chat.image.chunk', uploadId, index, data: slice })) {
+          activeUploadRef.current = null;
+          return false;
+        }
+      }
+      activeUploadRef.current = null;
+      return true;
     } catch (error) {
       setNotice({
         tone: 'error',
@@ -658,6 +711,15 @@ export function useGameSocket() {
     } finally {
       if (generation === uploadGenerationRef.current) setImagePreparing(false);
     }
+  }, [send]);
+
+  const cancelUpload = useCallback(() => {
+    const uploadId = activeUploadRef.current;
+    activeUploadRef.current = null;
+    uploadGenerationRef.current += 1;
+    setUploadProgress(null);
+    setImagePreparing(false);
+    if (uploadId) send({ type: 'chat.image.cancel', uploadId }, true);
   }, [send]);
 
   const leaveRoom = useCallback(() => {
@@ -684,6 +746,8 @@ export function useGameSocket() {
     typingPlayerId,
     quickReactions,
     imagePreparing,
+    uploadProgress,
+    cancelUpload,
     createRoom,
     joinRoom,
     move,

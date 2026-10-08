@@ -17,13 +17,17 @@ import type { Cell, Mark } from './game';
  * 4 - capabilities: a connection is a player or a spectator, and every command is
  *     authorised against that rather than against membership alone. Adds
  *     `room.spectate`, `room.policy` and `spectator.ready`.
+ * 5 - images move in bounded chunks with acknowledgements, timeouts and
+ *     cancellation, and attachment memory is budgeted per room and per process.
+ *     Adds `chat.image.begin`, `chat.image.chunk`, `chat.image.cancel` and
+ *     `upload.progress`.
  *
  * GitHub Pages and Render deploy independently, so a version skew window always
  * exists. The server therefore keeps accepting MIN_SUPPORTED_CLIENT_PROTOCOL for
  * one release cycle rather than cutting old clients off mid-match, and clients
  * compare against `server.hello` to tell the player to refresh.
  */
-export const PROTOCOL_VERSION = 4;
+export const PROTOCOL_VERSION = 5;
 /**
  * Raised to 2 in this release, deliberately.
  *
@@ -34,7 +38,7 @@ export const PROTOCOL_VERSION = 4;
  * honest behaviour. A v2 client, by contrast, is still fully served: every v2
  * command remains valid in v3.
  */
-export const MIN_SUPPORTED_CLIENT_PROTOCOL = 3;
+export const MIN_SUPPORTED_CLIENT_PROTOCOL = 4;
 export const LEGACY_CLIENT_PROTOCOL = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
@@ -43,7 +47,25 @@ export const MAX_CHAT_IMAGE_BYTES = 1_500_000;
 export const MAX_CHAT_IMAGE_SOURCE_BYTES = 8_000_000;
 export const MAX_CHAT_IMAGE_DIMENSION = 1_600;
 export const CHAT_HISTORY_LIMIT = 80;
-export const ROOM_IMAGE_MEMORY_LIMIT = 6_000_000;
+/**
+ * Attachment memory budgets.
+ *
+ * A room refuses an upload that would cross its ceiling rather than silently
+ * evicting an older image (D-006): a picture vanishing from the conversation
+ * with no explanation reads as data loss, while a refusal can be acted on.
+ */
+export const ROOM_IMAGE_MEMORY_LIMIT = 10_000_000;
+export const PROCESS_IMAGE_MEMORY_LIMIT = 50_000_000;
+
+/** Bounded frames rather than one giant payload. */
+export const UPLOAD_CHUNK_BYTES = 64_000;
+/** An upload with no activity for this long is abandoned and its buffer freed. */
+export const UPLOAD_IDLE_TIMEOUT_MS = 20_000;
+/**
+ * Optional lifetime for chat content even inside a live room. Off by default;
+ * the host turns it on.
+ */
+export const CONTENT_EXPIRY_MS = 5 * 60_000;
 export const SUPPORTED_IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 export const STICKER_IDS = ['handshake', 'fire', 'laugh', 'mind-blown', 'bullseye', 'sparkles'] as const;
 export const QUICK_REACTIONS = ['😂', '🔥', '👏', '😮', '💀', '❤️', '🎯', '🤝'] as const;
@@ -86,7 +108,27 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
   // the slot and the loser has to be told it lost (D-002).
   z.object({ type: z.literal('session.claim'), requestId, ...envelope }).strict(),
   z.object({ type: z.literal('room.spectate'), requestId, roomCode, ...envelope }).strict(),
-  z.object({ type: z.literal('room.policy'), requestId, spectatorChat: z.boolean(), ...envelope }).strict(),
+  z.object({ type: z.literal('room.policy'), requestId, spectatorChat: z.boolean(), expireContent: z.boolean().optional(), ...envelope }).strict(),
+  // Chunked upload. The whole image never exists as a single frame on the wire.
+  z.object({
+    type: z.literal('chat.image.begin'),
+    requestId,
+    uploadId: z.string().uuid(),
+    mime: z.enum(SUPPORTED_IMAGE_MIME_TYPES),
+    width: z.number().int().min(1).max(MAX_CHAT_IMAGE_DIMENSION),
+    height: z.number().int().min(1).max(MAX_CHAT_IMAGE_DIMENSION),
+    byteLength: z.number().int().min(1).max(MAX_CHAT_IMAGE_BYTES),
+    chunks: z.number().int().min(1).max(2_000),
+    ...envelope,
+  }).strict(),
+  z.object({
+    type: z.literal('chat.image.chunk'),
+    uploadId: z.string().uuid(),
+    index: z.number().int().min(0).max(1_999),
+    data: z.string().min(1).max(UPLOAD_CHUNK_BYTES * 2),
+    ...envelope,
+  }).strict(),
+  z.object({ type: z.literal('chat.image.cancel'), uploadId: z.string().uuid(), ...envelope }).strict(),
   z.object({ type: z.literal('chat.message'), requestId, text: z.string().min(1).max(MAX_CHAT_TEXT_LENGTH), ...envelope }).strict(),
   z.object({ type: z.literal('chat.typing'), typing: z.boolean(), ...envelope }).strict(),
   z.object({ type: z.literal('chat.quick-reaction'), requestId, reaction: z.enum(QUICK_REACTIONS), ...envelope }).strict(),
@@ -195,6 +237,10 @@ export interface RoomSnapshot {
   /** How many people are watching without holding a slot. */
   spectatorCount: number;
   spectatorPolicy: SpectatorPolicy;
+  /** When true, chat content disappears after CONTENT_EXPIRY_MS even in a live room. */
+  contentExpiry: boolean;
+  /** Attachment bytes this room currently holds, against its budget. */
+  attachmentBytes: number;
 }
 
 export interface ChatReactionSnapshot {
@@ -254,6 +300,9 @@ export type RejectionCode =
   | 'INVALID_REACTION'
   | 'INVALID_IMAGE'
   | 'IMAGE_TOO_LARGE'
+  /** The room or the process has no attachment memory left. */
+  | 'MEMORY_BUDGET'
+  | 'UPLOAD_NOT_FOUND'
   | 'RATE_LIMITED'
   | 'PROTOCOL_MISMATCH'
   /** This window is attached but another one holds the player slot. */
@@ -336,4 +385,20 @@ export type ServerMessage =
   | { type: 'session.ended'; reason: 'LEFT' | 'EXPIRED' | 'SERVER_SHUTDOWN'; message: string }
   | { type: 'command.rejected'; requestId?: string; code: RejectionCode; message: string }
   | { type: 'server.notice'; code: 'ROOM_EXPIRED'; message: string }
+  | {
+      /** Content that has aged out. Clients drop these ids and revoke their blobs. */
+      type: 'chat.expired';
+      messageIds: string[];
+      sequence: number;
+    }
+  | {
+      /**
+       * Per-chunk acknowledgement. The sender learns how much actually landed,
+       * so a stalled upload is visible rather than silently pending.
+       */
+      type: 'upload.progress';
+      uploadId: string;
+      received: number;
+      expected: number;
+    }
   | { type: 'presence.pong'; sentAt: number; serverTime: number };

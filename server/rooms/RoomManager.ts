@@ -6,6 +6,9 @@ import {
   MAX_CHAT_IMAGE_DIMENSION,
   MAX_CHAT_TEXT_LENGTH,
   ROOM_IMAGE_MEMORY_LIMIT,
+  PROCESS_IMAGE_MEMORY_LIMIT,
+  UPLOAD_IDLE_TIMEOUT_MS,
+  CONTENT_EXPIRY_MS,
   type ChatMessageSnapshot,
   type ChatReactionSnapshot,
   type ChatSnapshot,
@@ -34,6 +37,34 @@ const REQUEST_LEDGER_TTL_MS = 120_000;
 const REQUEST_LEDGER_LIMIT = 512;
 
 type RateBucket = 'chat' | 'reaction' | 'typing' | 'image';
+
+/**
+ * A token bucket, replacing the flat sliding window.
+ *
+ * The old limit could not tell an enthusiastic player from a spammer: twelve
+ * messages in eight seconds throttled both. A bucket separates the two axes -
+ * `capacity` is how much burst is forgiven, `refillPerSecond` is the rate that
+ * can be sustained forever. Someone reacting quickly spends burst and earns it
+ * back; someone firing continuously runs dry and stays dry.
+ */
+interface TokenBucket {
+  tokens: number;
+  updatedAt: number;
+}
+
+interface PendingUpload {
+  uploadId: string;
+  requestId: string;
+  playerId: string;
+  mime: SupportedImageMime;
+  width: number;
+  height: number;
+  byteLength: number;
+  chunks: number;
+  parts: Array<string | undefined>;
+  received: number;
+  timer: ReturnType<typeof setTimeout> | null;
+}
 
 type ControlReason = 'GRANTED' | 'DISPLACED' | 'RESUMED' | 'RECLAIMED';
 
@@ -84,7 +115,7 @@ interface Player {
    */
   announcedPresence: PresenceState;
   requests: Map<string, LedgerEntry>;
-  rateLimits: Record<RateBucket, number[]>;
+  rateLimits: Record<RateBucket, TokenBucket>;
 }
 
 interface Spectator {
@@ -134,6 +165,9 @@ interface Room {
    */
   spectators: Map<string, Spectator>;
   spectatorPolicy: SpectatorPolicy;
+  contentExpiry: boolean;
+  /** Uploads in flight, keyed by uploadId. Freed on completion, cancel or idle. */
+  uploads: Map<string, PendingUpload>;
   revision: number;
   chatSequence: number;
   round: number;
@@ -155,6 +189,12 @@ export interface RoomManagerOptions {
   reservationTtlMs?: number;
   cleanupIntervalMs?: number;
   typingTtlMs?: number;
+  /**
+   * Attachment ceilings, overridable so a test can reach them without moving
+   * ten megabytes of real image data through the socket.
+   */
+  roomImageLimitBytes?: number;
+  processImageLimitBytes?: number;
   now?: () => number;
 }
 
@@ -188,6 +228,8 @@ export class RoomManager {
   private readonly waitingRoomTtlMs: number;
   private readonly reservationTtlMs: number;
   private readonly typingTtlMs: number;
+  private readonly roomImageLimit: number;
+  private readonly processImageLimit: number;
   private readonly cleanupTimer: ReturnType<typeof setInterval>;
   private readonly now: () => number;
 
@@ -198,6 +240,8 @@ export class RoomManager {
     this.waitingRoomTtlMs = options.waitingRoomTtlMs ?? 10 * 60_000;
     this.reservationTtlMs = options.reservationTtlMs ?? 10 * 60_000;
     this.typingTtlMs = options.typingTtlMs ?? 2_500;
+    this.roomImageLimit = options.roomImageLimitBytes ?? ROOM_IMAGE_MEMORY_LIMIT;
+    this.processImageLimit = options.processImageLimitBytes ?? PROCESS_IMAGE_MEMORY_LIMIT;
     this.now = options.now ?? Date.now;
     this.cleanupTimer = setInterval(() => this.sweep(), options.cleanupIntervalMs ?? 15_000);
     this.cleanupTimer.unref?.();
@@ -222,6 +266,8 @@ export class RoomManager {
       // Off by default. A private room that silently broadcast its conversation
       // to anyone holding the code would be a privacy failure, not a feature.
       spectatorPolicy: { chat: false },
+      contentExpiry: false,
+      uploads: new Map(),
       revision: 1,
       chatSequence: 0,
       round: 1,
@@ -383,7 +429,7 @@ export class RoomManager {
    * never carries a message at all, so there is nothing to reveal by inspecting
    * the client.
    */
-  setSpectatorPolicy(peerId: string, requestId: string, chat: boolean): void {
+  setSpectatorPolicy(peerId: string, requestId: string, chat: boolean, expireContent?: boolean): void {
     const { room, player } = this.requireControl(peerId);
     if (room.hostPlayerId !== player.id) {
       throw new CommandError('FORBIDDEN', 'Only the room host can change who may chat.');
@@ -391,6 +437,7 @@ export class RoomManager {
     if (this.recall(player, requestId)) return;
     this.remember(player, requestId, { kind: 'silent' });
     room.spectatorPolicy = { chat };
+    if (expireContent !== undefined) room.contentExpiry = expireContent;
     this.bump(room);
     this.broadcastGame(room);
   }
@@ -489,7 +536,7 @@ export class RoomManager {
     // The ledger is consulted before the rate limiter: a client retrying a
     // command it never saw acknowledged must not be punished for the retry.
     if (this.replayChat(room, player, peer, requestId)) return;
-    this.checkRate(player, 'chat', 12, 8_000);
+    this.checkRate(player, 'chat', 10, 1);
     const normalized = text.trim();
     if (!normalized) throw new CommandError('INVALID_CHAT', 'Write a message before sending.');
     if (normalized.length > MAX_CHAT_TEXT_LENGTH) {
@@ -505,7 +552,7 @@ export class RoomManager {
   sendSticker(peerId: string, requestId: string, stickerId: StickerId): void {
     const { room, player, peer } = this.requireChatMembership(peerId);
     if (this.replayChat(room, player, peer, requestId)) return;
-    this.checkRate(player, 'chat', 12, 8_000);
+    this.checkRate(player, 'chat', 10, 1);
     const message: StoredChatMessage = {
       id: randomUUID(), requestId, senderId: player.id, kind: 'sticker', stickerId,
       createdAt: this.now(), sequence: 0, reactions: new Map(),
@@ -520,7 +567,7 @@ export class RoomManager {
   ): void {
     const { room, player, peer } = this.requireChatMembership(peerId);
     if (this.replayChat(room, player, peer, requestId)) return;
-    this.checkRate(player, 'image', 3, 30_000);
+    this.checkRate(player, 'image', 3, 0.1);
     const bytes = this.validateImage(image.mime, image.width, image.height, image.byteLength, image.data);
     if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
       throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
@@ -532,9 +579,196 @@ export class RoomManager {
     this.storeAndBroadcastMessage(room, player, message);
   }
 
+  // --- Chunked uploads and memory budgets (P7-01..P7-08) -------------------
+
+  /** Bytes this room holds, counting uploads still in flight. */
+  private roomAttachmentBytes(room: Room): number {
+    let total = room.chatImageBytes;
+    for (const upload of room.uploads.values()) total += upload.byteLength;
+    return total;
+  }
+
+  /**
+   * Computed rather than kept as a running total. A counter would drift the
+   * first time a cleanup path forgot to decrement it, and the drift would only
+   * surface much later as a mysterious refusal.
+   */
+  private processAttachmentBytes(): number {
+    let total = 0;
+    for (const room of this.rooms.values()) total += this.roomAttachmentBytes(room);
+    return total;
+  }
+
+  /**
+   * Opens a chunked upload, reserving its budget up front.
+   *
+   * Reserving at begin rather than at completion is what makes the limit
+   * meaningful: a dozen half-finished uploads would otherwise sit in memory
+   * entirely unaccounted for.
+   */
+  beginImageUpload(
+    peerId: string,
+    requestId: string,
+    meta: {
+      uploadId: string;
+      mime: SupportedImageMime;
+      width: number;
+      height: number;
+      byteLength: number;
+      chunks: number;
+    },
+  ): void {
+    const { room, player, peer } = this.requireChatMembership(peerId);
+    if (this.replayChat(room, player, peer, requestId)) return;
+    this.checkRate(player, 'image', 3, 0.1);
+
+    if (room.uploads.has(meta.uploadId)) {
+      throw new CommandError('INVALID_IMAGE', 'That upload is already in progress.');
+    }
+    if (this.roomAttachmentBytes(room) + meta.byteLength > this.roomImageLimit) {
+      // Refused, never evicted (D-006): an image vanishing from the
+      // conversation with no explanation reads as data loss, whereas a refusal
+      // can be acted on.
+      throw new CommandError(
+        'MEMORY_BUDGET',
+        'This room is holding as many images as it can. Send a smaller one, or let some expire.',
+      );
+    }
+    if (this.processAttachmentBytes() + meta.byteLength > this.processImageLimit) {
+      throw new CommandError('MEMORY_BUDGET', 'The service is at its attachment capacity. Try again shortly.');
+    }
+
+    const upload: PendingUpload = {
+      uploadId: meta.uploadId,
+      requestId,
+      playerId: player.id,
+      mime: meta.mime,
+      width: meta.width,
+      height: meta.height,
+      byteLength: meta.byteLength,
+      chunks: meta.chunks,
+      parts: new Array<string | undefined>(meta.chunks),
+      received: 0,
+      timer: null,
+    };
+    room.uploads.set(meta.uploadId, upload);
+    this.armUploadTimeout(room, upload);
+    peer.send({ type: 'upload.progress', uploadId: meta.uploadId, received: 0, expected: meta.chunks });
+  }
+
+  pushImageChunk(peerId: string, uploadId: string, index: number, data: string): void {
+    const { room, player, peer } = this.requireChatMembership(peerId);
+    const upload = room.uploads.get(uploadId);
+    // Scoped to the uploader: one player may not feed another's upload.
+    if (!upload || upload.playerId !== player.id) {
+      throw new CommandError('UPLOAD_NOT_FOUND', 'That upload is no longer open.');
+    }
+    if (index >= upload.chunks) {
+      throw new CommandError('INVALID_IMAGE', 'Chunk index is outside the declared range.');
+    }
+
+    if (upload.parts[index] === undefined) {
+      upload.parts[index] = data;
+      upload.received += 1;
+    }
+    this.armUploadTimeout(room, upload);
+    peer.send({ type: 'upload.progress', uploadId, received: upload.received, expected: upload.chunks });
+    if (upload.received === upload.chunks) this.completeUpload(room, player, upload);
+  }
+
+  cancelImageUpload(peerId: string, uploadId: string): void {
+    const { room, player } = this.requireChatMembership(peerId);
+    const upload = room.uploads.get(uploadId);
+    if (!upload || upload.playerId !== player.id) return;
+    this.discardUpload(room, upload);
+  }
+
+  /** Frees a partial upload. The only path by which upload memory is released. */
+  private discardUpload(room: Room, upload: PendingUpload): void {
+    if (upload.timer) clearTimeout(upload.timer);
+    upload.timer = null;
+    upload.parts.length = 0;
+    room.uploads.delete(upload.uploadId);
+  }
+
+  /**
+   * Restarted on every chunk, so the timeout measures silence rather than total
+   * duration. A slow but live upload should not be punished for being slow.
+   */
+  private armUploadTimeout(room: Room, upload: PendingUpload): void {
+    if (upload.timer) clearTimeout(upload.timer);
+    upload.timer = setTimeout(() => {
+      if (!this.rooms.has(room.code)) return;
+      this.discardUpload(room, upload);
+    }, UPLOAD_IDLE_TIMEOUT_MS);
+    upload.timer.unref?.();
+  }
+
+  private completeUpload(room: Room, player: Player, upload: PendingUpload): void {
+    const data = upload.parts.join('');
+    const { requestId, mime, width, height } = upload;
+    this.discardUpload(room, upload);
+
+    const bytes = this.validateImage(mime, width, height, upload.byteLength, data);
+    if (bytes.byteLength > MAX_CHAT_IMAGE_BYTES) {
+      throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
+    }
+    // Re-checked after assembly: the reservation was made against a declared
+    // size, and the room may have filled while the chunks were in flight.
+    if (room.chatImageBytes + bytes.byteLength > this.roomImageLimit) {
+      throw new CommandError('MEMORY_BUDGET', 'This room filled up while that image was uploading.');
+    }
+
+    const message: StoredChatMessage = {
+      id: randomUUID(),
+      requestId,
+      senderId: player.id,
+      kind: 'image',
+      mime,
+      width,
+      height,
+      byteLength: bytes.byteLength,
+      data,
+      createdAt: this.now(),
+      sequence: 0,
+      reactions: new Map(),
+    };
+    this.storeAndBroadcastMessage(room, player, message);
+  }
+
+  /**
+   * Drops content past its lifetime when the room has opted in (P7-08).
+   *
+   * Announced rather than silently removed, so a client can revoke the blob
+   * URLs it holds. Otherwise the bytes would live on in the browser long after
+   * the server let go of them, which would make the ephemerality claim false
+   * exactly where it matters.
+   */
+  private expireContent(room: Room, timestamp: number): boolean {
+    if (!room.contentExpiry || room.chatMessages.length === 0) return false;
+    const expired: string[] = [];
+    while (room.chatMessages.length && timestamp - room.chatMessages[0].createdAt > CONTENT_EXPIRY_MS) {
+      const removed = room.chatMessages.shift();
+      if (!removed) break;
+      expired.push(removed.id);
+      removed.reactions.clear();
+      if (removed.kind === 'image') {
+        room.chatImageBytes -= removed.byteLength;
+        removed.data = '';
+      }
+    }
+    if (!expired.length) return false;
+    this.broadcastChat(room, {
+      type: 'chat.expired',
+      messageIds: expired,
+      sequence: this.nextChatSequence(room),
+    });
+    return true;
+  }
+
   setTyping(peerId: string, typing: boolean): void {
     const { room, player } = this.requireChatMembership(peerId);
-    this.checkRate(player, 'typing', 12, 5_000);
+    this.checkRate(player, 'typing', 15, 4);
     if (!typing) {
       this.clearTyping(room, player.id, true);
       return;
@@ -564,7 +798,7 @@ export class RoomManager {
   toggleMessageReaction(peerId: string, requestId: string, messageId: string, reaction: MessageReaction): void {
     const { room, player, peer } = this.requireChatMembership(peerId);
     if (this.replayChat(room, player, peer, requestId)) return;
-    this.checkRate(player, 'reaction', 20, 5_000);
+    this.checkRate(player, 'reaction', 20, 3);
     const message = room.chatMessages.find((candidate) => candidate.id === messageId);
     if (!message) throw new CommandError('INVALID_REACTION', 'That message is no longer available.');
     const players = message.reactions.get(reaction) ?? new Set<string>();
@@ -586,7 +820,7 @@ export class RoomManager {
   sendQuickReaction(peerId: string, requestId: string, reaction: QuickReaction): void {
     const { room, player } = this.requireChatMembership(peerId);
     if (this.recall(player, requestId)) return;
-    this.checkRate(player, 'reaction', 20, 5_000);
+    this.checkRate(player, 'reaction', 20, 3);
     this.remember(player, requestId, { kind: 'silent' });
     room.updatedAt = this.now();
     this.broadcastChat(room, {
@@ -669,6 +903,7 @@ export class RoomManager {
     const room = this.rooms.get(code.toUpperCase());
     if (!room) return;
     this.clearStartTimer(room);
+    for (const upload of [...room.uploads.values()]) this.discardUpload(room, upload);
     for (const timer of room.typingTimers.values()) clearTimeout(timer);
     room.typingTimers.clear();
     room.typing.clear();
@@ -680,7 +915,7 @@ export class RoomManager {
       }
       player.token = '';
       player.requests.clear();
-      for (const entries of Object.values(player.rateLimits)) entries.length = 0;
+      for (const state of Object.values(player.rateLimits)) state.tokens = 0;
       player.connections.clear();
       player.controllingPeerId = null;
     }
@@ -755,7 +990,7 @@ export class RoomManager {
   }
 
   private pruneChat(room: Room): void {
-    while (room.chatMessages.length > CHAT_HISTORY_LIMIT || room.chatImageBytes > ROOM_IMAGE_MEMORY_LIMIT) {
+    while (room.chatMessages.length > CHAT_HISTORY_LIMIT || room.chatImageBytes > this.roomImageLimit) {
       const removed = room.chatMessages.shift();
       if (!removed) return;
       removed.reactions.clear();
@@ -859,6 +1094,8 @@ export class RoomManager {
       round: room.round,
       spectatorCount: room.spectators.size,
       spectatorPolicy: { ...room.spectatorPolicy },
+      contentExpiry: room.contentExpiry,
+      attachmentBytes: room.chatImageBytes,
       players: [...room.players.values()]
         .sort((a, b) => a.mark.localeCompare(b.mark))
         .map((player) => ({
@@ -958,7 +1195,12 @@ export class RoomManager {
       reconnectDeadline: null,
       announcedPresence: 'online',
       requests: new Map(),
-      rateLimits: { chat: [], reaction: [], typing: [], image: [] },
+      rateLimits: {
+        chat: { tokens: 10, updatedAt: this.now() },
+        reaction: { tokens: 20, updatedAt: this.now() },
+        typing: { tokens: 15, updatedAt: this.now() },
+        image: { tokens: 3, updatedAt: this.now() },
+      },
     };
   }
 
@@ -1125,12 +1367,24 @@ export class RoomManager {
     }
   }
 
-  private checkRate(player: Player, bucket: RateBucket, limit: number, windowMs: number): void {
+  /**
+   * Spends one token, refilling first.
+   *
+   * `capacity` is the burst a normal person is allowed - six quick reactions in
+   * two seconds should never be punished. `refillPerSecond` is what can be kept
+   * up indefinitely. A spammer exhausts the burst in one go and is then held to
+   * the sustained rate, which is the whole point of P7-09.
+   */
+  private checkRate(player: Player, bucket: RateBucket, capacity: number, refillPerSecond: number): void {
     const timestamp = this.now();
-    const entries = player.rateLimits[bucket].filter((entry) => timestamp - entry < windowMs);
-    entries.push(timestamp);
-    player.rateLimits[bucket] = entries;
-    if (entries.length > limit) throw new CommandError('RATE_LIMITED', 'Slow down for a moment and try again.');
+    const state = player.rateLimits[bucket];
+    const elapsedSeconds = Math.max(0, timestamp - state.updatedAt) / 1_000;
+    state.tokens = Math.min(capacity, state.tokens + elapsedSeconds * refillPerSecond);
+    state.updatedAt = timestamp;
+    if (state.tokens < 1) {
+      throw new CommandError('RATE_LIMITED', 'Slow down for a moment and try again.');
+    }
+    state.tokens -= 1;
   }
 
   private clearTyping(room: Room, playerId: string, broadcast: boolean): void {
@@ -1165,6 +1419,8 @@ export class RoomManager {
     const timestamp = this.now();
     for (const room of [...this.rooms.values()]) {
       const players = [...room.players.values()];
+
+      if (this.expireContent(room, timestamp)) this.bump(room);
 
       // Announce derived presence drift. Nothing else will: the move from
       // reconnecting to offline is the passage of time, not an event.

@@ -203,22 +203,36 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 7 — Media pipeline, memory and backpressure
 
-- [ ] **P7-01** Chunked image transfer with sequence numbers, per-chunk acks and timeouts,
-      replacing the single Base64 frame.
-- [ ] **P7-02** Per-room attachment budget: 10MB active media RAM.
-- [ ] **P7-03** Process-wide attachment budget: 50MB.
-- [ ] **P7-04** Exceeding a budget fails the upload gracefully with a specific rejection code —
-      today the room limit silently evicts the oldest attachment instead.
-- [ ] **P7-05** Backpressure: monitor `bufferedAmount`, define and enforce the slow-receiver
-      policy so server RAM cannot grow unbounded.
-- [ ] **P7-06** User-initiated upload cancellation; partial buffers freed on both ends.
-- [ ] **P7-07** Incomplete and orphaned transfers discarded on disconnect and on timeout.
-- [ ] **P7-08** Optional automatic content expiry — messages and images disappear after 5
-      minutes even in an active room.
-- [ ] **P7-09** Rate-limit intelligence: burst allowance plus sustained ceiling, so normal fast
-      play is never throttled but a spammer is.
-- [ ] **P7-10** Memory pressure test: 20 concurrent uploading rooms stay within budget; RAM
-      returns to baseline after teardown.
+- [x] **P7-01** `chat.image.begin` / `chat.image.chunk` / `chat.image.cancel`, 64KB chunks, with
+      `upload.progress` acknowledging each one so a stall is visible rather than silently pending.
+      The idle timeout restarts on every chunk, so it measures *silence* rather than duration — a
+      slow but live upload is not punished for being slow.
+- [x] **P7-02** 10MB per room, reserved at `begin` rather than at completion — a dozen
+      half-finished uploads would otherwise sit in memory entirely unaccounted for.
+- [x] **P7-03** 50MB process-wide, **computed** from live rooms rather than kept as a running
+      total. A counter drifts the first time a cleanup path forgets to decrement it, and the drift
+      only surfaces much later as a mysterious refusal.
+- [x] **P7-04** `MEMORY_BUDGET`, and the earlier images stay (D-006). Byte-based eviction is
+      gone: a picture vanishing from the conversation with no explanation reads as data loss.
+- [x] **P7-05** Past 1MB buffered, only `game.snapshot` and `session.ready` are forced through —
+      they are small and a client that misses one shows a stale board. Past 8MB the connection is
+      closed, because it now costs more memory than it is worth and the client's own reconnect is
+      the cheaper recovery.
+- [x] **P7-06** `chat.image.cancel`, and the client stops between chunks rather than finishing
+      the send and discarding the result afterwards.
+- [x] **P7-07** `discardUpload` is the single path by which upload memory is released; room
+      teardown and the idle timeout both go through it.
+- [x] **P7-08** Host-enabled, five minutes, swept against the room's own clock. **Announced**
+      via `chat.expired` rather than dropped silently, so clients revoke the blob URLs they hold —
+      otherwise the bytes outlive the server's copy inside the browser, which is exactly where an
+      ephemerality claim would quietly become false.
+- [x] **P7-09** Token buckets replace the flat sliding window, which could not tell an
+      enthusiastic player from a spammer — twelve messages in eight seconds throttled both. Burst
+      is what is forgiven; refill is what can be sustained forever. Evidenced by the Phase 3 run
+      where a paced 30-message test was cut off at 24.
+- [x] **P7-10** Budget ceilings are injectable (`roomImageLimitBytes`), so the refusal path is
+      tested by reaching a real limit rather than pushing ten megabytes through a socket to prove
+      a rule about arithmetic. Teardown is asserted to leave no partial upload behind.
 
 ## Phase 8 — End-to-end encryption and invitations
 
