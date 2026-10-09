@@ -5,6 +5,7 @@ const labels: Record<ConnectionState, string> = {
   connected: 'Connected',
   reconnecting: 'Reconnecting',
   disconnected: 'Disconnected',
+  offline: 'Offline',
 };
 
 export function ConnectionBadge({ state }: { state: ConnectionState }) {

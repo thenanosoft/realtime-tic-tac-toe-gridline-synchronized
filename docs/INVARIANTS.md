@@ -183,3 +183,13 @@ every screen size.
 *Defended by:* `P10-06`, which walks the path rather than inspecting a keyframe.
 *How it breaks:* moving the path into CSS keyframes, where the claim stops being checkable; or
 widening the board without revisiting the clearance.
+
+### INV-17 — The app never pretends to be available
+An installed or offline client says it has no connection rather than presenting an interface that
+quietly does nothing. The service worker serves navigations network-first, and no cache ever
+answers for something only the live server can know.
+
+*Defended by:* `P11-09`, and the Playwright spec that drops the network and brings it back.
+*How it breaks:* a cache-first service worker; gating reconnection on `navigator.onLine`, which
+reports a link rather than reachability; or treating a surviving socket as proof of nothing and
+reconnecting over a working one.

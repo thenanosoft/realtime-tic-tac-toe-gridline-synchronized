@@ -29,6 +29,8 @@ interface ChatPanelProps {
   onSendText(text: string): Promise<boolean>;
   /** Whether bodies in this room are sealed before they leave the browser. */
   encrypted: boolean;
+  /** A private room whose key this window does not hold. */
+  needsKey: boolean;
   onTyping(typing: boolean): void;
   onSticker(stickerId: StickerId): boolean;
   onQuickReaction(reaction: QuickReaction): boolean;
@@ -48,6 +50,7 @@ export function ChatPanel({
   onClose,
   onSendText,
   encrypted,
+  needsKey,
   onTyping,
   onSticker,
   onQuickReaction,
@@ -70,7 +73,10 @@ export function ChatPanel({
   const previousLastIdRef = useRef<string | null>(null);
 
   const typingPlayer = players.find((player) => player.id === typingPlayerId);
-  const canChat = connected && players.length === 2;
+  // A window without the room key cannot write a message anyone could read,
+    // so the composer says so rather than accepting text and failing on send.
+    // The failure was silent before: the message simply stayed in the box.
+    const canChat = connected && players.length === 2 && !needsKey;
   const activePreview = preview && messages.some((message) => message.id === preview.id) ? preview : null;
 
   useEffect(() => {
@@ -91,6 +97,19 @@ export function ChatPanel({
       document.removeEventListener('keydown', handleKey);
     };
   }, [picker]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleKey = (event: KeyboardEvent) => {
+      // Innermost first: Escape closes the picker or the preview if one is
+      // open, and only then the panel itself. Closing everything at once is the
+      // behaviour that makes a keyboard user lose their place.
+      if (event.key !== 'Escape' || picker || preview) return;
+      onClose();
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => document.removeEventListener('keydown', handleKey);
+  }, [onClose, open, picker, preview]);
 
   useEffect(() => {
     if (!activePreview) return;
@@ -211,7 +230,9 @@ export function ChatPanel({
         </header>
         <p className="chat-privacy">
           <span aria-hidden="true">⌁</span>
-          {encrypted
+          {needsKey
+            ? 'This room is private and this window does not hold its key. Open the room from its invitation link to read and write messages.'
+            : encrypted
             ? 'Encrypted in this browser. The server routes these messages without being able to read them.'
             : 'Messages and images disappear when this session ends.'}
         </p>

@@ -209,9 +209,27 @@ export function GameRoom({
     return () => clearTimeout(timer);
   }, [replaying, replayStep, snapshot.moves.length]);
 
+  const chatToggleRef = useRef<HTMLButtonElement>(null);
+
+  const closeChat = () => {
+    setChatOpen(false);
+    // Focus goes back to the button that opened the panel. Without this it
+    // falls to the document and the next Tab starts from the top of the page.
+    chatToggleRef.current?.focus();
+  };
+
   const openChat = () => {
     setChatOpen(true);
     setUnread(0);
+    // Focus moves into the composer on the next frame, so a keyboard user lands
+    // where the panel is for rather than having to tab past the whole board to
+    // reach it. Done here, from the gesture that opened the panel, rather than
+    // in an effect inside it: the click also focuses this button, and that
+    // default lands after React has committed - an effect focusing the composer
+    // wins that race and then quietly loses it.
+    requestAnimationFrame(() => {
+      document.querySelector<HTMLTextAreaElement>('#private-chat .composer-input textarea')?.focus();
+    });
   };
 
   return (
@@ -228,7 +246,7 @@ export function GameRoom({
       {watching && (
         // A watcher is told plainly what they are, rather than being handed a
         // board that silently refuses every click.
-        <div className="control-banner spectator-banner" role="status">
+        <div className="room-banner spectator-banner" role="status">
           <span aria-hidden="true">◉</span>
           <p>
             <strong>You are watching this room.</strong>
@@ -239,7 +257,7 @@ export function GameRoom({
         </div>
       )}
       {!watching && isHost && snapshot.spectatorCount > 0 && (
-        <div className="control-banner host-policy" role="group" aria-label="Spectator policy">
+        <div className="room-banner host-policy" role="group" aria-label="Spectator policy">
           <span aria-hidden="true">◉</span>
           <p>
             <strong>
@@ -257,7 +275,7 @@ export function GameRoom({
       {!hasControl && !watching && (
         // Said in words, not implied by a dead board. The window is still fully
         // live - it just is not the one holding the slot (D-002).
-        <div className="control-banner" role="status">
+        <div className="room-banner control-banner" role="status">
           <span aria-hidden="true">⌁</span>
           <p>
             <strong>Another window has control of this session.</strong>
@@ -270,7 +288,7 @@ export function GameRoom({
         // Said plainly, because the alternative is a chat panel full of blanks
         // and no explanation for why. The board is unaffected: the game state
         // was never encrypted, only what the players say to each other.
-        <div className="control-banner key-banner" role="status">
+        <div className="room-banner key-banner" role="status">
           <span aria-hidden="true">⌁</span>
           <p>
             This is a private room and this window does not hold its key. The match plays normally; the
@@ -289,7 +307,7 @@ export function GameRoom({
             <h1>Room <b>{snapshot.roomCode}</b></h1>
           </div>
           <div className="room-actions">
-            {!watching && <button className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
+            {!watching && <button ref={chatToggleRef} className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
               <span aria-hidden="true">⌁</span>
               <span className="btn-label">Chat</span>
               {unread > 0 && <b aria-label={`${unread} unread messages`}>{unread}</b>}
@@ -387,9 +405,10 @@ export function GameRoom({
           connected={connection === 'connected'}
           typingPlayerId={typingPlayerId}
           imagePreparing={imagePreparing}
-          onClose={() => setChatOpen(false)}
+          onClose={closeChat}
           onSendText={onSendText}
           encrypted={snapshot.encryption.enabled}
+          needsKey={needsKey}
           onTyping={onTyping}
           onSticker={onSticker}
           onQuickReaction={onQuickReaction}

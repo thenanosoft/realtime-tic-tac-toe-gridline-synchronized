@@ -1,4 +1,5 @@
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
+import { ServiceWorker } from './components/ServiceWorker';
 import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 
@@ -54,7 +55,25 @@ export const metadata: Metadata = {
     description: 'Create a private room, meet your opponent, and leave no chat history behind.',
     images: [socialImage],
   },
-  icons: { icon: `${basePath}/favicon.svg` },
+  icons: {
+    icon: `${basePath}/favicon.svg`,
+    apple: `${basePath}/apple-touch-icon.png`,
+  },
+  manifest: `${basePath}/manifest.webmanifest`,
+  appleWebApp: { capable: true, title: 'Gridline', statusBarStyle: 'black-translucent' },
+};
+
+/**
+ * `viewport-fit=cover` so the app can reach under the notch, with the safe-area
+ * insets honoured in CSS. `maximumScale` is deliberately *not* set: capping
+ * zoom is the single most common accessibility mistake in a mobile web app, and
+ * it is one the browser will not undo for the user.
+ */
+export const viewport: Viewport = {
+  themeColor: '#0a0b0e',
+  width: 'device-width',
+  initialScale: 1,
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({
@@ -68,6 +87,7 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
+        <ServiceWorker />
       </body>
     </html>
   );

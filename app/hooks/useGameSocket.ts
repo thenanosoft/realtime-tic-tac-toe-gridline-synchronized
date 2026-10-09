@@ -37,7 +37,7 @@ import { insertMessage, shouldApplyOverwrite, shouldApplySnapshot } from '../lib
 import { reconcile, type Speculation } from '../lib/speculation';
 import { clearSession, loadSession, saveSession, type StoredSession } from '../lib/session';
 
-export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected';
+export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'disconnected' | 'offline';
 export interface Notice { tone: 'error' | 'info' | 'success'; text: string }
 
 type ServerImageMessage = Extract<ChatMessageSnapshot, { kind: 'image' }>;
@@ -90,6 +90,15 @@ function getWebSocketUrl(): string | null {
 
 export function useGameSocket() {
   const [connection, setConnection] = useState<ConnectionState>('connecting');
+  /**
+   * The device says it has no network (P11-09).
+   *
+   * Tracked separately from the socket state because the two answer different
+   * questions. "The socket is down" is something to retry; "this device is
+   * offline" is something to say out loud, and an installed app that opens to a
+   * normal-looking board it cannot use is the worst version of this feature.
+   */
+  const [offline, setOffline] = useState(false);
   const [session, setSession] = useState<StoredSession | null>(null);
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [timing, setTiming] = useState<RoomTiming | null>(null);
@@ -602,8 +611,53 @@ export function useGameSocket() {
       if (invited) setRoomSecret(invited.secret);
     });
 
+    /**
+     * `navigator.onLine` is a diagnosis, never a gate.
+     *
+     * It reports whether the machine has a link, not whether anything is
+     * reachable - and the first version of this gated connection attempts on
+     * it, which produced exactly the failure the phase is about: a device whose
+     * link came back sat in an offline state forever because the only thing
+     * that would have noticed was the attempt it was refusing to make.
+     *
+     * So the socket is the authority on whether we are connected, and onLine
+     * only explains *why* it failed.
+     */
+    const networkIsDown = () => typeof navigator !== 'undefined' && navigator.onLine === false;
+    const goOnline = () => {
+      setOffline(false);
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      const socket = socketRef.current;
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        // The socket outlived the outage. A dropped link does not always close
+        // one - a short drop can leave it open and simply undelivered - so the
+        // state is re-derived here rather than assumed. Reconnecting instead
+        // would throw away a working connection, and leaving the label alone
+        // would show "offline" over a live game, which is the dishonesty this
+        // phase exists to remove.
+        setConnection('connected');
+        return;
+      }
+      // Straight back in rather than waiting out the backoff: the network just
+      // came back, which is better evidence than any timer.
+      reconnectAttemptRef.current = 0;
+      connectRef.current();
+    };
+    const goOffline = () => {
+      setOffline(true);
+      setConnection('offline');
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('offline', goOffline);
+      window.addEventListener('online', goOnline);
+    }
+
     const connect = () => {
       if (stoppedRef.current || protocolBlockedRef.current) return;
+      // Checked before every attempt, not only once: an installed app opened
+      // with no network must say so rather than spend the backoff pretending
+      // it is about to connect (P11-09).
+
       if (socketRef.current && socketRef.current.readyState < WebSocket.CLOSING) return;
       setConnection(reconnectAttemptRef.current ? 'reconnecting' : 'connecting');
       const webSocketUrl = getWebSocketUrl();
@@ -619,6 +673,7 @@ export function useGameSocket() {
 
       socket.addEventListener('open', () => {
         reconnectAttemptRef.current = 0;
+        setOffline(false);
         setConnection('connected');
         setNotice((current) => current?.tone === 'error' ? current : null);
         if (sessionRef.current) {
@@ -670,7 +725,14 @@ export function useGameSocket() {
           setNotice({ tone: 'info', text: 'This session was resumed in another window.' });
           return;
         }
-        setConnection('reconnecting');
+        // Told apart at the point of failure: a socket that will not open on a
+        // device reporting no network is an offline state worth naming, and one
+        // on a connected device is an ordinary reconnect.
+        if (networkIsDown()) goOffline();
+        else {
+          setOffline(false);
+          setConnection('reconnecting');
+        }
         // The speculative mark is deliberately left standing across a drop. The
         // move may well have reached the server, and the resume snapshot will
         // settle it correctly either way; clearing it here would flicker a mark
@@ -711,6 +773,10 @@ export function useGameSocket() {
     }
     return () => {
       stoppedRef.current = true;
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('offline', goOffline);
+        window.removeEventListener('online', goOnline);
+      }
       if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
       if (heartbeatRef.current) clearInterval(heartbeatRef.current);
       socketRef.current?.close(1000, 'Page closed');
@@ -1003,6 +1069,7 @@ export function useGameSocket() {
     toggleMessageReaction,
     sendImage,
     leaveRoom,
+    offline,
     encrypted: snapshot?.encryption.enabled ?? false,
     keyEpoch: snapshot?.encryption.epoch ?? 0,
     needsKey,

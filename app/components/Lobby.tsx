@@ -84,6 +84,11 @@ export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpec
             <button onClick={() => onSpectate(fullRoomCode)} disabled={unavailable}>Watch instead</button>
           </p>
         )}
+        <p className="code-note">
+          <span aria-hidden="true">⌁</span>
+          A room code is enough to play. An encrypted room also needs its invitation link, which
+          carries the key - without it the match works and the conversation stays sealed.
+        </p>
         <p className="privacy-note"><span aria-hidden="true">⌁</span> No account · Ephemeral chat · Just this session</p>
       </div>
 

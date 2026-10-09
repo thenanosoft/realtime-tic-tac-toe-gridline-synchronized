@@ -8,8 +8,9 @@ Severity: **S1** breaks the experience · **S2** clearly noticeable · **S3** po
 
 **Status after Phase 1:** S1-A, S1-B, S2-A, S2-B, S2-C, S2-D and S2-F are fixed and covered by
 regression tests in `tests/styles.test.ts`. S2-E was investigated and withdrawn — it was not a
-real defect. S1-C is deliberately deferred to Phase 11, where the reduced-motion state is
-designed alongside the accessibility pass. The S3 items remain open.
+real defect. S1-C was deferred to Phase 11 by design and is **closed there**: the reduced-motion
+state was designed alongside the accessibility pass rather than bolted on. The S3 items remain
+open.
 
 ---
 
@@ -89,6 +90,23 @@ Safari's automatic zoom-on-focus, because Safari zooms any input under 16px. The
 should be 16px on touch viewports regardless of the visual scale chosen.
 
 ---
+
+## S1-C — Reduced motion is a kill switch, not a design · `P11-03` · **CLOSED 2026-10-08**
+
+Closed in Phase 11. The blanket override is gone from `globals.css`. In its place:
+
+- Movement is removed — `animation: none`, including decorative loops.
+- Opacity and colour still transition, at 150ms, so a state change still reads as a change rather
+  than as a jump. Zero duration is the kill switch by another name.
+- Entrances become crossfades (`reduced-fade`); the two moments that must be noticed — a mark
+  landing and the countdown — keep a non-moving emphasis (`reduced-emphasis`); a reaction arrives
+  and leaves in place (`reduced-reaction`), sitting at the end of its path, which is the position
+  already proved clear of the playable cells.
+
+Reviewed at every phase transition (`P11-04`): countdown, mark placement, winning line, replay,
+reactions, chat panel. The style suite asserts the kill switch has not come back, that the
+replacement keyframes exist rather than being names for nothing, and that the duration is
+shortened rather than zeroed.
 
 ## S1-C — Reduced motion is a kill switch, not a design · `P11-03`
 

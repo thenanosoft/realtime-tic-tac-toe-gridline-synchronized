@@ -1,5 +1,6 @@
 'use client';
 
+import { Announcer } from './Announcer';
 import { ConnectionBadge } from './ConnectionBadge';
 import { Lobby } from './Lobby';
 import { GameRoom } from './GameRoom';
@@ -30,6 +31,18 @@ export function GameApp() {
         </div>
       </header>
 
+      {game.offline && (
+        // Said plainly and at the top, because an installed app opened without
+        // a network otherwise looks completely normal and simply does nothing
+        // (P11-09).
+        <div className="offline-banner" role="status">
+          <span aria-hidden="true">⌁</span>
+          <div>
+            <strong>You are offline</strong>
+            <p>Gridline is a live game between two people, so it needs a connection. It will reconnect by itself.</p>
+          </div>
+        </div>
+      )}
       {!game.session && !game.spectator && (
         <Lobby
           connection={game.connection}
@@ -83,6 +96,12 @@ export function GameApp() {
         </section>
       )}
 
+      <Announcer
+        snapshot={game.snapshot}
+        viewerId={game.session?.playerId ?? game.spectator?.spectatorId ?? ''}
+        lastMessage={game.chatMessages.at(-1) ?? null}
+        offline={game.offline}
+      />
       {game.notice && (
         <div className={`notice-toast notice-${game.notice.tone}`} role={game.notice.tone === 'error' ? 'alert' : 'status'}>
           <span aria-hidden="true">{game.notice.tone === 'error' ? '!' : 'i'}</span>

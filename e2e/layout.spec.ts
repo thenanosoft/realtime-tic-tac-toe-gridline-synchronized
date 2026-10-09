@@ -22,12 +22,23 @@ const VIEWPORTS = [
   { name: 'desktop', width: 1440, height: 900 },
 ] as const;
 
+/**
+ * Cell geometry measured against the board, not the viewport.
+ *
+ * The defect this guards is rows resizing as marks land - a property of the
+ * grid, which viewport coordinates describe only as long as nothing scrolls.
+ * Clicking a cell scrolls it into view, so once the room grew past the window
+ * these numbers started reporting a one-off scroll as a moving board. Taking
+ * the board frame as the origin measures the thing the test is named after.
+ */
 async function cellBoxes(page: Page) {
+  const origin = await page.locator('.board-frame').boundingBox();
+  if (!origin) throw new Error('the board frame has no box');
   const boxes = [];
   for (let index = 0; index < 9; index += 1) {
     const box = await cell(page, index).boundingBox();
     if (!box) throw new Error('cell ' + index + ' has no box');
-    boxes.push(box);
+    boxes.push({ ...box, x: box.x - origin.x, y: box.y - origin.y });
   }
   return boxes;
 }

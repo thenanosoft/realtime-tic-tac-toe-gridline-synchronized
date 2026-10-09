@@ -339,19 +339,55 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 11 — Accessibility, motion, mobile and PWA
 
-- [ ] **P11-01** Full keyboard operation of game and chat, including the picker and image flow.
-- [ ] **P11-02** Screen reader announcements for turn change, move placed, result, presence
-      change and incoming message — polite vs assertive chosen deliberately.
-- [ ] **P11-03** Replace the blanket reduced-motion kill switch with a designed reduced-motion
-      state.
-- [ ] **P11-04** Reduced-motion visual review at every phase transition.
-- [ ] **P11-05** 667×375 landscape fully usable.
-- [ ] **P11-06** 375px one-thumb switching between game and conversation without losing context.
-- [ ] **P11-07** Desktop board dominance verified with 30 chat messages.
-- [ ] **P11-08** Installable PWA — manifest, icons, install prompt.
-- [ ] **P11-09** Offline honesty: an installed PWA opened offline must not pretend multiplayer
-      is available.
-- [ ] **P11-10** Automated a11y scan clean on lobby and room.
+- [x] **P11-01** The whole journey without a mouse: create, invite, play, chat, send, close, play
+      on. Escape closes the innermost thing first — picker, then preview, then the panel — because
+      closing everything at once is what makes a keyboard user lose their place. Closing returns
+      focus to the control that opened the panel, and opening moves focus into the composer, done
+      from the opening gesture rather than from an effect inside the panel: the click that opens it
+      also focuses the toggle, and that default lands *after* React commits, so an effect wins the
+      race and then quietly loses it.
+- [x] **P11-02** Two live regions, both **derived during render** with no state and no effects — a
+      live region announces when its text changes, so a pure function of the authoritative snapshot
+      cannot drift from the screen or double-announce. Polite carries the turn, the move just
+      played, presence and an incoming message; assertive carries only the result, the series and
+      losing the network, because every assertive announcement cancels the one before it. Message
+      bodies are never read aloud: in an encrypted room the text may be unreadable anyway, and
+      reading every message over a live game is more interruption than it is worth.
+- [x] **P11-03** The blanket `animation-duration: .01ms !important` is gone (S1-C closed). What
+      replaces it keeps the two things that carry meaning — that something changed, and which thing
+      — and removes the two that carry only style: travel and scale. Opacity and colour still
+      transition, shortened; entrances become crossfades; the reaction sits at the end of its path,
+      which is the position already proved clear of the cells (INV-16).
+- [x] **P11-04** Every phase transition reviewed in the reduced state: countdown, mark placement,
+      the winning line, the replay, reactions, the chat panel. Each either keeps a non-moving
+      emphasis or is removed outright — nothing was left snapping, which is what the kill switch
+      produced and what reads as a broken interface rather than a calm one.
+- [x] **P11-05** 667×375 and anything near it gets its own rules. The vertical budget is the whole
+      problem, so the chrome gives up height and the board keeps its size; the chat panel takes a
+      side rather than the screen, because covering a landscape board means losing the game to read
+      a message.
+- [x] **P11-06** At 375px both controls sit in the bottom corner inside the safe-area inset, within
+      a thumb's reach. The board is never unmounted behind the panel, so switching back restores
+      the same board and the same scroll position — it never went away.
+- [x] **P11-07** Asserted with thirty real messages: the board's width does not change as the
+      conversation grows. Writing that test turned up a second finding — thirty messages fired
+      instantly are *correctly* throttled by the Phase 7 token bucket, so the first version of it
+      was measuring the rate limiter rather than the layout.
+- [x] **P11-08** Manifest, service worker and icons, all hand-written. The icons are drawn by
+      `scripts/generate-icons.mjs`: a PNG is a signature, three chunks and a CRC, and the
+      alternative was an image dependency this project does not otherwise need. Output is
+      committed, so no build depends on running it.
+- [x] **P11-09** Navigations are **network-first**, which the usual cache-first template gets
+      exactly backwards twice over: it pins installed users to a stale build, and it makes an
+      offline app look like a working one. `navigator.onLine` is treated as a *diagnosis*, never a
+      gate — the first version gated connection attempts on it and produced precisely the failure
+      this task is about, a device whose link came back sitting offline forever because the only
+      thing that would have noticed was the attempt it was refusing to make. A link drop does not
+      always close a socket, so coming back re-derives the state instead of assuming it.
+- [x] **P11-10** axe-core over the lobby, the room and the room with chat open. It found a real
+      defect no review had: `role="gridcell"` with no `role="row"` between the cells and the grid.
+      Fixed with row wrappers at `display: contents`, which leaves the CSS grid untouched and gives
+      the accessibility tree the structure the role promises.
 
 ## Phase 12 — Privacy audit, log audit and full E2E
 

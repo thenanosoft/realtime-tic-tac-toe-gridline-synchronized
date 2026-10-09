@@ -53,7 +53,20 @@ export function GameBoard({ snapshot, myMark, interactive, speculation, replayBo
 
   return (
     <div className={`game-board preview-${myMark.toLowerCase()} ${playable ? 'is-interactive' : ''} ${replaying ? 'is-replaying' : ''} ${snapshot.winner && !replaying ? 'has-winner' : ''}`} role="grid" aria-label={replaying ? 'Tic-Tac-Toe board, replaying the round' : 'Tic-Tac-Toe board'}>
-      {board.map((mark, index) => {
+      {[0, 1, 2].map((rowIndex) => (
+        /**
+         * A grid needs rows. The cells were direct children of the grid
+         * container, which an automated scan correctly rejects: role="gridcell"
+         * has to sit inside role="row", and a screen reader announcing "column
+         * 2" with no row to count against is announcing very little.
+         *
+         * `display: contents` keeps the CSS grid exactly as it was - the three
+         * wrappers generate no boxes - while giving the accessibility tree the
+         * structure the role promises.
+         */
+        <div className="board-row" role="row" key={rowIndex}>
+      {board.slice(rowIndex * 3, rowIndex * 3 + 3).map((mark, columnIndex) => {
+        const index = rowIndex * 3 + columnIndex;
         const winning = !replaying && snapshot.winningLine?.includes(index);
         const dimmed = !replaying && Boolean(snapshot.winningLine && !winning);
         const unconfirmed = speculation?.cell === index && snapshot.board[index] === null;
@@ -83,6 +96,8 @@ export function GameBoard({ snapshot, myMark, interactive, speculation, replayBo
           </button>
         );
       })}
+        </div>
+      ))}
       {winningKey && <span className={`winning-line line-${winningKey}`} aria-hidden="true" />}
     </div>
   );

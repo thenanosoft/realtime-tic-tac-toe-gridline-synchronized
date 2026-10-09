@@ -751,3 +751,48 @@ frame would otherwise fling the glyph across the board.
 32-bit integer, so the hash mixer returned a negative remainder for about half of all seeds — a
 negative array index and an `undefined` accent. A spot check on three names would have passed half
 the time. Asserting over all 480 names failed immediately and unambiguously.
+
+---
+
+## 2026-10-08 — Phase 11 closed: usable without a mouse, without motion, and offline
+
+Branch `phase/11-accessibility-motion-pwa`. **213 unit tests** (up from 199) and five new
+Playwright specs. No protocol change.
+
+**The automated scan earned its place immediately.** axe found something no review had: the board
+declared `role="grid"` and put `role="gridcell"` straight inside it, with no rows. Nine cells
+promising a structure that was not there. The fix is row wrappers at `display: contents` — the CSS
+grid is untouched, and the accessibility tree gets what the role promised.
+
+**Announcements are derived, not stored.** Both live regions are a pure function of the snapshot,
+computed during render. A live region announces when its text changes, so no state and no effects
+are needed — and it cannot drift from the screen, double-announce after a re-render, or announce a
+state the room has already left. The urgency split is the real design work: polite for the turn,
+the move, presence and incoming messages; assertive only for the result, the series and losing the
+network. Every assertive announcement cancels the one before it, so a game that shouted everything
+would be unusable.
+
+**Reduced motion is now a state rather than a switch** (S1-C, open since Phase 1). The blanket
+`.01ms` override did stop the movement, and it also made everything *snap* — a countdown that
+teleports between numbers reads as a broken interface. What replaces it keeps what carries meaning
+(something changed, and which thing) and drops what carries only style (travel and scale).
+
+**The offline work went wrong in an instructive way.** The first implementation gated connection
+attempts on `navigator.onLine`, which produced exactly the failure the task exists to prevent: a
+device whose link returned sat in an offline state forever, because the only thing that would have
+noticed was the attempt it was refusing to make. `onLine` reports whether the machine has a link,
+not whether anything is reachable — so it is now a diagnosis of *why* a socket failed, never a gate
+on trying. A second finding came out of the same test: a dropped link does not always close a
+socket, so recovery re-derives the connection state instead of assuming it needs a new one.
+
+**Everything in the PWA is hand-written, including the icons.** `scripts/generate-icons.mjs` draws
+them: a PNG is a signature, three chunks and a CRC. The alternative was an image-processing
+dependency this project does not otherwise need, after two phases spent establishing that sending
+things to a service you do not need is a cost. The service worker serves navigations network-first,
+which the usual cache-first template gets backwards twice over — it pins installed users to a stale
+build, and it makes an offline app look like a working one.
+
+**One product bug fell out of the test work.** Encryption is on by default, and a guest who joins
+by typing the room code holds no key — so their messages were refused on send, silently, leaving
+the text sitting in the box. The composer now refuses up front and says why, the lobby says what a
+code does and does not carry, and the E2E harness joins by link, the way an invitee actually does.
