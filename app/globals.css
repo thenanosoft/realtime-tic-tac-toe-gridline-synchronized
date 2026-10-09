@@ -1063,7 +1063,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 .reaction-popup:nth-child(2) { top: 27%; }
 .reaction-popup:nth-child(3) { top: 39%; }
 
-@media (min-width: 1380px) {
+/* The same width at which the panel opens itself, not a wider one.
+   Between the two breakpoints the panel opened over the room and covered the
+   controls in the top right - the invite button, and later the match panel's
+   actions. A panel that opens on its own has to make room for itself. */
+@media (min-width: 1121px) {
   .room-shell.chat-open .room-stage { padding-right: 374px; }
   .room-shell.chat-open .arena { gap: clamp(18px, 2vw, 34px); grid-template-columns: minmax(175px, 210px) minmax(405px, 540px) minmax(175px, 210px); }
 }

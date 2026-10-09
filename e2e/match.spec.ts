@@ -14,7 +14,11 @@ test.describe('match features in a real browser', () => {
   test('a backgrounded tab loses the turn it did not use', async ({ browser }) => {
     const { host, guest } = await startMatch(browser);
 
+    // The format controls live in a popover now, so that changing them cannot
+    // resize the panel and push the board down mid-match (P1-01).
+    await host.getByRole('button', { name: /format/i }).click();
     await host.getByRole('button', { name: '15s', exact: true }).click();
+    await host.keyboard.press('Escape');
     await expect(host.locator('.turn-clock')).toBeVisible();
     // X moves first, and the host is X in round one.
     await expect(host.locator('.game-status.tone-your-turn')).toBeVisible();
@@ -42,7 +46,7 @@ test.describe('match features in a real browser', () => {
     for (const index of [0, 3, 1, 4, 2]) await playAt(pages, index);
     await expect(host.locator('.game-board.has-winner')).toBeVisible();
 
-    await host.getByRole('button', { name: /replay 5 moves/i }).click();
+    await host.getByRole('button', { name: /^replay$/i }).click();
     // The replay starts from an empty board, which is the one state that
     // cannot be the live position in a finished round.
     await expect(host.locator('.game-board.is-replaying')).toBeVisible();

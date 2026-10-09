@@ -5,6 +5,11 @@ in commits (`P1-01: give the board explicit grid rows`).
 
 Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]` blocked
 
+**All thirteen phases are closed** as of 2026-10-09. Every task below is done and has a test
+behind it; the reasoning for each sits beside it rather than in a commit message nobody will
+read again. What remains open is listed in [DECISIONS.md](./DECISIONS.md) and in the S3 section
+of [UX_AUDIT.md](./UX_AUDIT.md) - neither blocks anything shipped.
+
 ---
 
 ## Phase 0 — Baseline and guardrails

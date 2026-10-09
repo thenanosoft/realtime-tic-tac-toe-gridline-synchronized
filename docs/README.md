@@ -11,6 +11,11 @@ the plan lives only in a chat transcript.
 | [DECISIONS.md](./DECISIONS.md) | Architecture decision log, including the decisions still open and who must make them. |
 | [PROGRESS.md](./PROGRESS.md) | Running changelog. One entry per phase completed, written when the phase closes. |
 | [INVARIANTS.md](./INVARIANTS.md) | The correctness properties the system must never violate. Tests exist to defend these. |
+| [PRIVACY_AUDIT.md](./PRIVACY_AUDIT.md) | What the product retains, logs and sends, with the test behind each claim. |
+
+**Programme status: complete.** Phases 0-12 closed between 2026-08-29 and 2026-10-09. 236 unit
+tests, 28 end-to-end specs, a 240-match chaos matrix in CI, and eighteen invariants with tests
+defending them.
 
 ## How we work
 
