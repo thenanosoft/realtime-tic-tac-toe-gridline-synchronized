@@ -348,3 +348,30 @@ blank again.
 states exactly what each older server omits. Note the defaults use `??` rather than `||`: with
 `||`, "encryption is off" and "no attachments" would become "the server did not say", which is a
 different claim.
+
+## D-015 — Watchers hold the room key, which replaces D-011 · **DECIDED** · 2026-10-09
+
+**Context.** D-011 recorded that a spectator joins by room code, holds no key, and therefore
+cannot read an encrypted room's chat even when the host opens it to them. That was a real
+guarantee and it was worth having.
+
+Phase 13 asks for two things that cannot both be true alongside it: one invitation link for
+everyone, and watchers who can talk. The link is where the key lives, so a single link means
+everyone who opens it holds the key.
+
+**Decision.** One link, and watchers hold the key. The narrower promise in D-011 is withdrawn.
+
+**What is still true.** The server still cannot read anything. End-to-end encryption is intact in
+the sense that matters most - the service relaying the conversation is not a party to it. What
+changed is the size of the circle: from "the two people playing" to "everyone holding the link",
+which is what the invitation panel has said in those words since Phase 8.
+
+**What is no longer true.** A host can no longer open chat to watchers while being sure they
+cannot read it. That combination was always a strange one to want, and with one link it is not
+available.
+
+**Consequence.** Spectator chat defaults to **on**. Keeping it off by default would have withheld
+a conversation from people who already hold the key to it, which protects nothing and makes a
+room with an audience feel like two rooms. The host can still close it, and closing still
+withholds the frames at the server rather than hiding them in the UI (INV-10). `docs/
+PRIVACY_AUDIT.md` states the wider circle plainly rather than leaving the old wording to rot.

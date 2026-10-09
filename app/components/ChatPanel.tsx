@@ -31,6 +31,13 @@ interface ChatPanelProps {
   encrypted: boolean;
   /** A private room whose key this window does not hold. */
   needsKey: boolean;
+  /**
+   * Watching rather than playing. Watchers talk, but the controls tied to a
+   * seat stay with the seat: an image counts against the room's attachment
+   * budget, and a quick reaction animates from a player's side of the arena,
+   * which a watcher does not have (P10-05).
+   */
+  watching: boolean;
   onTyping(typing: boolean): void;
   onSticker(stickerId: StickerId): boolean;
   onQuickReaction(reaction: QuickReaction): boolean;
@@ -51,6 +58,7 @@ export function ChatPanel({
   onSendText,
   encrypted,
   needsKey,
+  watching,
   onTyping,
   onSticker,
   onQuickReaction,
@@ -161,6 +169,10 @@ export function ChatPanel({
 
   const handleTextChange = (value: string) => {
     setText(value.slice(0, MAX_CHAT_TEXT_LENGTH));
+    // The typing indicator is keyed by player id, so a watcher has nowhere to
+    // appear in it and the server refuses the command. Not sending it is
+    // better than sending something that will be rejected on every keystroke.
+    if (watching) return;
     if (!value.trim()) {
       stopTyping();
       return;
@@ -255,10 +267,19 @@ export function ChatPanel({
           )}
           {messages.map((message) => {
             const mine = message.senderId === selfId;
-            const sender = players.find((player) => player.id === message.senderId)?.name ?? 'Player';
+            // The name travels with the message (P13-09). Looking it up in the
+            // player list stopped working the moment watchers could talk, and
+            // was already wrong for anyone who had been seated out since.
+            const sender = message.senderName
+              ?? players.find((player) => player.id === message.senderId)?.name
+              ?? 'Someone';
             return (
               <article className={`chat-message ${mine ? 'is-mine' : 'is-theirs'} kind-${message.kind}`} key={message.id}>
-                <div className="chat-message-meta"><strong>{mine ? 'You' : sender}</strong><time>{formatTimestamp(message.createdAt)}</time></div>
+                <div className="chat-message-meta">
+                  <strong>{mine ? 'You' : sender}</strong>
+                  {message.senderRole === 'spectator' && <span className="sender-role">watching</span>}
+                  <time>{formatTimestamp(message.createdAt)}</time>
+                </div>
                 <div className="chat-bubble">
                   {message.undecryptable && (
                     // Shown rather than hidden. Dropping it would leave a hole
@@ -306,18 +327,18 @@ export function ChatPanel({
           {typingPlayer ? <><span /><b>{typingPlayer.name}</b> is typing…</> : <span className="typing-placeholder">Private signal ready</span>}
         </div>
 
-        <div className="quick-reaction-row" aria-label="Quick game reactions">
+        {!watching && <div className="quick-reaction-row" aria-label="Quick game reactions">
           <span>REACT</span>
           {QUICK_REACTIONS.map((reaction) => (
             <button key={reaction} onClick={() => onQuickReaction(reaction)} disabled={!canChat} aria-label={`Send ${reaction} reaction`}>{reaction}</button>
           ))}
-        </div>
+        </div>}
 
         <form className="chat-composer" onSubmit={submit}>
           <div className="composer-tools" ref={pickerRef}>
             <button type="button" className={picker === 'emoji' ? 'is-active' : ''} onClick={() => setPicker((current) => current === 'emoji' ? null : 'emoji')} aria-label="Open emoji picker" aria-expanded={picker === 'emoji'}>☺</button>
             <button type="button" className={picker === 'sticker' ? 'is-active' : ''} onClick={() => setPicker((current) => current === 'sticker' ? null : 'sticker')} aria-label="Open sticker picker" aria-expanded={picker === 'sticker'}>◇</button>
-            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={!canChat || imagePreparing} aria-label="Share an image">{imagePreparing ? '…' : '⌁'}</button>
+            {!watching && <button type="button" onClick={() => fileInputRef.current?.click()} disabled={!canChat || imagePreparing} aria-label="Share an image">{imagePreparing ? '…' : '⌁'}</button>}
             <input ref={fileInputRef} type="file" accept="image/jpeg,image/png,image/webp" onChange={handleFile} tabIndex={-1} aria-hidden="true" />
             {picker && (
               <div className={`chat-picker picker-${picker}`} role="dialog" aria-label={picker === 'emoji' ? 'Emoji picker' : 'Sticker picker'}>

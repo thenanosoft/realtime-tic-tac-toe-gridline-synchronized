@@ -36,6 +36,7 @@ export function withProtocolDefaults(incoming: RoomSnapshot): RoomSnapshot {
     turnLimitMs: wire.turnLimitMs ?? null,
     drawOffer: wire.drawOffer ?? null,
     moves: wire.moves ?? [],
+    playRequests: wire.playRequests ?? [],
   };
 }
 

@@ -81,6 +81,8 @@ export function GameApp() {
           onFormat={game.setMatchFormat}
           onOfferDraw={game.offerDraw}
           onRespondToDraw={game.respondToDraw}
+          onAskToPlay={game.askToPlay}
+          onSeatWatcher={game.seatWatcher}
           playSound={sound.play}
           chatMessages={game.chatMessages}
           typingPlayerId={game.typingPlayerId}

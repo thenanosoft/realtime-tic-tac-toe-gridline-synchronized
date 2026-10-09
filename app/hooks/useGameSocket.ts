@@ -135,6 +135,9 @@ export function useGameSocket() {
    * would invite code to treat it as one.
    */
   const [spectator, setSpectator] = useState<{ roomCode: string; spectatorId: string; displayName: string } | null>(null);
+  const spectatorRef = useRef<{ spectatorId: string } | null>(null);
+  /** True while a join that came from an invitation link is outstanding. */
+  const invitedJoinRef = useRef(false);
   const [hasControl, setHasControl] = useState(true);
   const [controlReason, setControlReason] = useState<'GRANTED' | 'DISPLACED' | 'RESUMED' | 'RECLAIMED' | null>(null);
   const [chatMessages, setChatMessages] = useState<ClientChatMessage[]>([]);
@@ -434,6 +437,12 @@ export function useGameSocket() {
           displayName: message.displayName,
           mark: message.mark,
         };
+        // A watcher who has just been given a seat arrives here.
+        if (spectatorRef.current) {
+          setSpectator(null);
+          spectatorRef.current = null;
+          setNotice({ tone: 'success', text: 'You are playing this match.' });
+        }
         sessionRef.current = nextSession;
         roomCodeRef.current = message.roomCode;
         if (pendingSecretRef.current) {
@@ -470,6 +479,15 @@ export function useGameSocket() {
         return;
       case 'spectator.ready': {
         setLobbyBusy(false);
+        // A player who has just been seated out arrives here. Their token is
+        // gone, so the stored session has to go with it - leaving it behind
+        // would have the next reload try to resume a seat someone else holds.
+        if (sessionRef.current) {
+          clearSession();
+          sessionRef.current = null;
+          setSession(null);
+          setNotice({ tone: 'info', text: 'The host gave your seat to someone else. You are watching now.' });
+        }
         setSpectator({ roomCode: message.roomCode, spectatorId: message.spectatorId, displayName: message.displayName });
         acceptSnapshot(message.snapshot, message.timing);
         return;
@@ -537,7 +555,24 @@ export function useGameSocket() {
         setResyncing(false);
         // A full room is not an error to a would-be watcher: remember the code so
         // the lobby can offer to spectate instead of just saying no.
-        if (message.code === 'ROOM_FULL') setFullRoomCode(lastJoinAttemptRef.current);
+        if (message.code === 'ROOM_FULL') {
+          const code = lastJoinAttemptRef.current;
+          if (invitedJoinRef.current && code) {
+            // One link for everyone (P13-04). Someone who opened an invitation
+            // meant to come in; which chair they get is the room's business,
+            // not theirs, and sending them back to the lobby to press "watch
+            // instead" is asking them to confirm a decision already made.
+            invitedJoinRef.current = false;
+            setLobbyBusy(true);
+            // Straight to the socket, the way the resume does: this handler is
+            // defined above the send helper, and hoisting one to reach the
+            // other would put a dependency cycle in a hook nobody wants to
+            // debug later. Both paths still go through the single encode().
+            socketRef.current?.send(encode({ type: 'room.spectate', requestId: requestId(), roomCode: code }));
+            return;
+          }
+          setFullRoomCode(code);
+        }
         // A rejection of the speculative move rolls it back and carries the
         // server's own reason, which is more useful than a generic one. Routed
         // through settleSpeculation so the notice is not raised twice.
@@ -696,6 +731,7 @@ export function useGameSocket() {
         if (!sessionRef.current && invited) {
           pendingInviteRef.current = null;
           lastJoinAttemptRef.current = invited;
+          invitedJoinRef.current = true;
           setLobbyBusy(true);
           socket.send(encode({ type: 'room.join', requestId: requestId(), roomCode: invited }));
         }
@@ -889,6 +925,14 @@ export function useGameSocket() {
     if (!send({ type: 'room.spectate', requestId: requestId(), roomCode: clean })) setLobbyBusy(false);
   }, [send]);
 
+  const askToPlay = useCallback((wants: boolean) => {
+    send({ type: wants ? 'room.request-play' : 'room.withdraw-play', requestId: requestId() });
+  }, [send]);
+
+  const seatWatcher = useCallback((spectatorId: string) => {
+    send({ type: 'room.seat', requestId: requestId(), spectatorId });
+  }, [send]);
+
   const setSpectatorChat = useCallback((allowed: boolean) => {
     send({ type: 'room.policy', requestId: requestId(), spectatorChat: allowed });
   }, [send]);
@@ -1018,6 +1062,10 @@ export function useGameSocket() {
     send({ type: 'room.leave', requestId: requestId() });
   }, [send]);
 
+  useEffect(() => {
+    spectatorRef.current = spectator ? { spectatorId: spectator.spectatorId } : null;
+  }, [spectator]);
+
   const roomCode = session?.roomCode ?? spectator?.roomCode ?? null;
   const inviteUrl = roomCode && typeof window !== 'undefined'
     ? buildInviteUrl(window.location.href, { roomCode, secret: roomSecret })
@@ -1046,6 +1094,8 @@ export function useGameSocket() {
     spectator,
     spectateRoom,
     setSpectatorChat,
+    askToPlay,
+    seatWatcher,
     speculation,
     resyncing,
     hasControl,

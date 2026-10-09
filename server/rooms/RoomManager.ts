@@ -5,7 +5,9 @@ import {
   MAX_CHAT_IMAGE_BYTES,
   MAX_CHAT_IMAGE_DIMENSION,
   MAX_CHAT_TEXT_LENGTH,
+  type Capability,
   type DrawOfferSnapshot,
+  type PlayRequestSnapshot,
   type RoomEncryption,
   type SealedEnvelope,
   type SeriesSnapshot,
@@ -130,12 +132,48 @@ interface Spectator {
   id: string;
   peer: Peer;
   name: string;
+  /**
+   * Watchers can talk now (P13-05), so they need what talking requires: an
+   * idempotency ledger and their own rate buckets. Sharing a bucket between
+   * watchers would let one of them silence the rest.
+   */
+  requests: Map<string, LedgerEntry>;
+  rateLimits: Record<RateBucket, TokenBucket>;
+}
+
+/**
+ * Whoever is speaking, player or watcher.
+ *
+ * The chat paths were written when only players could talk and took a Player
+ * everywhere. Rather than branch at every call site - which is how one of the
+ * two roles quietly ends up missing a rate limit or a ledger - they now take
+ * the thing both roles are.
+ */
+/** Anything that can hold an idempotency ledger: a player or a watcher. */
+type LedgerHolder = { requests: Map<string, LedgerEntry> };
+/** Anything with its own rate buckets, for the same reason. */
+type RateHolder = { rateLimits: Record<RateBucket, TokenBucket> };
+
+interface ChatParticipant {
+  id: string;
+  name: string;
+  role: Capability;
+  requests: Map<string, LedgerEntry>;
+  rateLimits: Record<RateBucket, TokenBucket>;
 }
 
 interface StoredChatBase {
   id: string;
   requestId: string;
   senderId: string;
+  /**
+   * Captured when the message is stored rather than resolved when it is read
+   * (P13-09). The sender may be a watcher who was never in the player list, or
+   * a player who has since been seated out - and their earlier words should not
+   * lose their name because of what happened afterwards.
+   */
+  senderName: string;
+  senderRole: Capability;
   createdAt: number;
   sequence: number;
   reactions: Map<MessageReaction, Set<string>>;
@@ -174,6 +212,8 @@ interface Room {
    */
   spectators: Map<string, Spectator>;
   spectatorPolicy: SpectatorPolicy;
+  /** Watchers who have asked for the next seat, keyed by spectator id. */
+  playRequests: Map<string, { spectatorId: string; name: string; at: number }>;
   contentExpiry: boolean;
   /**
    * Whether bodies in this room are ciphertext, and which key generation is
@@ -306,9 +346,13 @@ export class RoomManager {
       rematchVotes: new Set(),
       hostPlayerId: player.id,
       spectators: new Map(),
-      // Off by default. A private room that silently broadcast its conversation
-      // to anyone holding the code would be a privacy failure, not a feature.
-      spectatorPolicy: { chat: false },
+      // On by default, which reverses the Phase 6 choice deliberately. That
+      // default protected watchers from overhearing a room they could not
+      // otherwise reach - but one link now carries everyone, watchers included,
+      // so withholding the conversation from them protects nothing and only
+      // makes the room feel like two rooms. The host can still close it.
+      spectatorPolicy: { chat: true },
+      playRequests: new Map(),
       contentExpiry: false,
       encryption: { enabled: encrypted, epoch: 0 },
       uploads: new Map(),
@@ -469,7 +513,13 @@ export class RoomManager {
       ...[...room.players.values()].map((player) => player.name),
       ...[...room.spectators.values()].map((spectator) => spectator.name),
     ]);
-    const spectator: Spectator = { id: randomUUID(), peer, name: generateTemporaryName(taken) };
+    const spectator: Spectator = {
+      id: randomUUID(),
+      peer,
+      name: generateTemporaryName(taken),
+      requests: new Map(),
+      rateLimits: this.freshRateLimits(),
+    };
     room.spectators.set(peer.id, spectator);
     this.spectatorIndex.set(peer.id, { roomCode: room.code, spectatorId: spectator.id });
     this.bump(room);
@@ -510,7 +560,11 @@ export class RoomManager {
     this.spectatorIndex.delete(peerId);
     const room = this.rooms.get(indexed.roomCode);
     if (!room) return true;
+    const leaving = room.spectators.get(peerId);
     room.spectators.delete(peerId);
+    // A watcher who leaves takes their request with them. Leaving it behind
+    // would offer the host a seat for someone who is no longer in the room.
+    if (leaving) room.playRequests.delete(leaving.id);
     this.bump(room);
     this.broadcastGame(room);
     return true;
@@ -778,11 +832,11 @@ export class RoomManager {
   }
 
   sendChatMessage(peerId: string, requestId: string, text: string, sealed?: SealedEnvelope): void {
-    const { room, player, peer } = this.requireChatMembership(peerId);
+    const { room, speaker, peer } = this.requireSpeaker(peerId);
     // The ledger is consulted before the rate limiter: a client retrying a
     // command it never saw acknowledged must not be punished for the retry.
-    if (this.replayChat(room, player, peer, requestId)) return;
-    this.checkRate(player, 'chat', 10, 1);
+    if (this.replayChat(room, speaker, peer, requestId)) return;
+    this.checkRate(speaker, 'chat', 10, 1);
     this.requireEncryptionAgreement(room, sealed);
     // A sealed body is passed through byte for byte. Trimming it would break
     // the authentication tag, and in a room where the server cannot read the
@@ -794,21 +848,23 @@ export class RoomManager {
       throw new CommandError('MESSAGE_TOO_LONG', `Messages can contain up to ${MAX_CHAT_TEXT_LENGTH} characters.`);
     }
     const message: StoredChatMessage = {
-      id: randomUUID(), requestId, senderId: player.id, kind: 'text', text: normalized, sealed,
+      id: randomUUID(), requestId, senderId: speaker.id, senderName: speaker.name, senderRole: speaker.role,
+      kind: 'text', text: normalized, sealed,
       createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
-    this.storeAndBroadcastMessage(room, player, message);
+    this.storeAndBroadcastMessage(room, speaker, message);
   }
 
   sendSticker(peerId: string, requestId: string, stickerId: StickerId): void {
-    const { room, player, peer } = this.requireChatMembership(peerId);
-    if (this.replayChat(room, player, peer, requestId)) return;
-    this.checkRate(player, 'chat', 10, 1);
+    const { room, speaker, peer } = this.requireSpeaker(peerId);
+    if (this.replayChat(room, speaker, peer, requestId)) return;
+    this.checkRate(speaker, 'chat', 10, 1);
     const message: StoredChatMessage = {
-      id: randomUUID(), requestId, senderId: player.id, kind: 'sticker', stickerId,
+      id: randomUUID(), requestId, senderId: speaker.id, senderName: speaker.name, senderRole: speaker.role,
+      kind: 'sticker', stickerId,
       createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
-    this.storeAndBroadcastMessage(room, player, message);
+    this.storeAndBroadcastMessage(room, speaker, message);
   }
 
   sendImage(
@@ -824,10 +880,11 @@ export class RoomManager {
       throw new CommandError('IMAGE_TOO_LARGE', 'The prepared image is too large to share.');
     }
     const message: StoredChatMessage = {
-      id: randomUUID(), requestId, senderId: player.id, kind: 'image', ...image,
+      id: randomUUID(), requestId, senderId: player.id, senderName: player.name, senderRole: 'player',
+      kind: 'image', ...image,
       byteLength: bytes.byteLength, createdAt: this.now(), sequence: 0, reactions: new Map(),
     };
-    this.storeAndBroadcastMessage(room, player, message);
+    this.storeAndBroadcastMessage(room, this.asSpeaker(player), message);
   }
 
   // --- Encryption (P8-03..P8-05) -------------------------------------------
@@ -1028,6 +1085,8 @@ export class RoomManager {
       id: randomUUID(),
       requestId,
       senderId: player.id,
+      senderName: player.name,
+      senderRole: 'player',
       kind: 'image',
       mime,
       width,
@@ -1039,7 +1098,7 @@ export class RoomManager {
       sequence: 0,
       reactions: new Map(),
     };
-    this.storeAndBroadcastMessage(room, player, message);
+    this.storeAndBroadcastMessage(room, this.asSpeaker(player), message);
   }
 
   /**
@@ -1268,9 +1327,14 @@ export class RoomManager {
     room.startTimer.unref?.();
   }
 
-  private storeAndBroadcastMessage(room: Room, player: Player, message: StoredChatMessage): void {
+  /** A player, in the terms the chat paths speak. */
+  private asSpeaker(player: Player): ChatParticipant {
+    return { id: player.id, name: player.name, role: 'player', requests: player.requests, rateLimits: player.rateLimits };
+  }
+
+  private storeAndBroadcastMessage(room: Room, speaker: ChatParticipant, message: StoredChatMessage): void {
     message.sequence = this.nextChatSequence(room);
-    this.remember(player, message.requestId, { kind: 'chat', messageId: message.id });
+    this.remember(speaker, message.requestId, { kind: 'chat', messageId: message.id });
     room.chatMessages.push(message);
     if (message.kind === 'image') room.chatImageBytes += message.byteLength;
     this.pruneChat(room);
@@ -1360,8 +1424,8 @@ export class RoomManager {
    * silence rather than a fabricated payload - the request did happen, so it
    * must not execute a second time.
    */
-  private replayChat(room: Room, player: Player, peer: Peer, requestId: string): boolean {
-    const outcome = this.recall(player, requestId);
+  private replayChat(room: Room, holder: LedgerHolder, peer: Peer, requestId: string): boolean {
+    const outcome = this.recall(holder, requestId);
     if (!outcome) return false;
     if (outcome.kind === 'chat') {
       const stored = room.chatMessages.find((candidate) => candidate.id === outcome.messageId);
@@ -1436,6 +1500,7 @@ export class RoomManager {
       series: this.seriesSnapshot(room),
       turnLimitMs: room.turnLimitMs,
       drawOffer: room.drawOffer ? { ...room.drawOffer } : null,
+      playRequests: this.playRequestSnapshot(room),
       moves: room.moves.map((move) => ({ ...move })),
       players: [...room.players.values()]
         .sort((a, b) => a.mark.localeCompare(b.mark))
@@ -1456,6 +1521,13 @@ export class RoomManager {
    * same bytes (INV-3). A Map iterates in insertion order, which differs
    * between a client that was here first and one that reconnected.
    */
+  /** Oldest first, because the queue is a queue. */
+  private playRequestSnapshot(room: Room): PlayRequestSnapshot[] {
+    return [...room.playRequests.values()]
+      .sort((a, b) => a.at - b.at || a.spectatorId.localeCompare(b.spectatorId))
+      .map((entry) => ({ spectatorId: entry.spectatorId, name: entry.name }));
+  }
+
   private seriesSnapshot(room: Room): SeriesSnapshot {
     return {
       target: room.seriesTarget,
@@ -1507,6 +1579,8 @@ export class RoomManager {
     const base = {
       id: message.id,
       senderId: message.senderId,
+      senderName: message.senderName,
+      senderRole: message.senderRole,
       createdAt: message.createdAt,
       sequence: message.sequence,
       reactions: this.reactionSnapshot(message),
@@ -1554,12 +1628,17 @@ export class RoomManager {
       reconnectDeadline: null,
       announcedPresence: 'online',
       requests: new Map(),
-      rateLimits: {
-        chat: { tokens: 10, updatedAt: this.now() },
-        reaction: { tokens: 20, updatedAt: this.now() },
-        typing: { tokens: 15, updatedAt: this.now() },
-        image: { tokens: 3, updatedAt: this.now() },
-      },
+      rateLimits: this.freshRateLimits(),
+    };
+  }
+
+  /** A full set of buckets. Players and watchers each get their own. */
+  private freshRateLimits(): Record<RateBucket, TokenBucket> {
+    return {
+      chat: { tokens: 10, updatedAt: this.now() },
+      reaction: { tokens: 20, updatedAt: this.now() },
+      typing: { tokens: 15, updatedAt: this.now() },
+      image: { tokens: 3, updatedAt: this.now() },
     };
   }
 
@@ -1609,6 +1688,156 @@ export class RoomManager {
       throw new CommandError('GAME_NOT_ACTIVE', 'Private chat opens when your opponent joins.');
     }
     return membership;
+  }
+
+  /** The player or watcher behind a connection, for anything either may send. */
+  private requireSpeaker(peerId: string): { room: Room; speaker: ChatParticipant; peer: Peer } {
+    const watching = this.spectatorIndex.get(peerId);
+    if (watching) {
+      const room = this.requireRoom(watching.roomCode);
+      const spectator = room.spectators.get(peerId);
+      if (!spectator) throw new CommandError('NOT_IN_ROOM', 'This connection is not watching a room.');
+      if (!room.spectatorPolicy.chat) {
+        // Enforced here rather than in the UI: a policy the server does not
+        // apply is a suggestion (INV-10).
+        throw new CommandError('FORBIDDEN', 'The host has closed the conversation to watchers.');
+      }
+      return {
+        room,
+        peer: spectator.peer,
+        speaker: {
+          id: spectator.id,
+          name: spectator.name,
+          role: 'spectator',
+          requests: spectator.requests,
+          rateLimits: spectator.rateLimits,
+        },
+      };
+    }
+    const { room, player, peer } = this.requireChatMembership(peerId);
+    return {
+      room,
+      peer,
+      speaker: { id: player.id, name: player.name, role: 'player', requests: player.requests, rateLimits: player.rateLimits },
+    };
+  }
+
+  /** The watcher behind a connection, for the things only a watcher may do. */
+  private requireWatcher(peerId: string): { room: Room; spectator: Spectator; peer: Peer } {
+    const watching = this.spectatorIndex.get(peerId);
+    const room = watching ? this.rooms.get(watching.roomCode) : null;
+    const spectator = room?.spectators.get(peerId);
+    if (!room || !spectator) {
+      throw new CommandError('NOT_WATCHING', 'Only someone watching the room can ask to play.');
+    }
+    return { room, spectator, peer: spectator.peer };
+  }
+
+  // --- Asking to play, and being seated (P13-07, P13-08) --------------------
+
+  requestToPlay(peerId: string, requestId: string, wants: boolean): void {
+    const { room, spectator, peer } = this.requireWatcher(peerId);
+    if (this.replayChat(room, spectator, peer, requestId)) return;
+    this.remember(spectator, requestId, { kind: 'game' });
+    if (wants) {
+      // Keyed by spectator, so asking twice is asking once - and the original
+      // time is kept, so the queue is ordered by who asked first rather than by
+      // who asked most recently.
+      if (!room.playRequests.has(spectator.id)) {
+        room.playRequests.set(spectator.id, { spectatorId: spectator.id, name: spectator.name, at: this.now() });
+      }
+    } else {
+      room.playRequests.delete(spectator.id);
+    }
+    this.bump(room);
+    this.broadcastGame(room, requestId);
+  }
+
+  /**
+   * Seats a watcher, and sends the player they replace out to watch.
+   *
+   * Only between rounds. Swapping a player mid-round would change who is
+   * playing a position they did not choose to enter, and the obvious
+   * alternative - queueing it until the round ends - hides a decision the host
+   * made minutes earlier behind a transition nobody is watching for.
+   */
+  seatSpectator(peerId: string, requestId: string, spectatorId: string): void {
+    const { room, player: host, peer } = this.requireControl(peerId);
+    if (this.recall(host, requestId)) {
+      peer.send({ type: 'game.snapshot', snapshot: this.snapshot(room), timing: this.timing(room), ackRequestId: requestId });
+      return;
+    }
+    if (room.hostPlayerId !== host.id) {
+      throw new CommandError('FORBIDDEN', 'Only the host can choose who plays.');
+    }
+    if (room.phase === 'active' || room.phase === 'countdown') {
+      throw new CommandError('ROUND_IN_PROGRESS', 'You can change the players between rounds.');
+    }
+    const entry = [...room.spectators.entries()].find(([, candidate]) => candidate.id === spectatorId);
+    if (!entry) throw new CommandError('NOT_IN_ROOM', 'That watcher has left the room.');
+    const [spectatorPeerId, spectator] = entry;
+    this.remember(host, requestId, { kind: 'game' });
+
+    // The seat that is not the host's. With one player the free mark is taken
+    // instead, so this also covers filling an empty room.
+    const outgoing = [...room.players.values()].find((candidate) => candidate.id !== host.id) ?? null;
+    const taken = new Set([...room.players.values()].map((candidate) => candidate.mark));
+    const mark: Mark = outgoing ? outgoing.mark : (taken.has('X') ? 'O' : 'X');
+
+    if (outgoing) {
+      for (const [connectionId, connection] of outgoing.connections) {
+        this.connectionIndex.delete(connectionId);
+        const watcher: Spectator = {
+          id: randomUUID(),
+          peer: connection,
+          name: outgoing.name,
+          requests: new Map(),
+          rateLimits: this.freshRateLimits(),
+        };
+        room.spectators.set(connectionId, watcher);
+        this.spectatorIndex.set(connectionId, { roomCode: room.code, spectatorId: watcher.id });
+        connection.send({
+          type: 'spectator.ready',
+          requestId,
+          roomCode: room.code,
+          spectatorId: watcher.id,
+          displayName: watcher.name,
+          capability: 'spectator',
+          snapshot: this.snapshot(room),
+          timing: this.timing(room),
+        });
+      }
+      room.players.delete(outgoing.id);
+      room.seriesWins.delete(outgoing.id);
+    }
+
+    room.spectators.delete(spectatorPeerId);
+    this.spectatorIndex.delete(spectatorPeerId);
+    room.playRequests.delete(spectator.id);
+
+    const seated = this.createPlayer(mark, spectator.peer, new Set([...room.players.values()].map((candidate) => candidate.name)));
+    seated.name = spectator.name;
+    room.players.set(seated.id, seated);
+    this.connectionIndex.set(spectatorPeerId, { roomCode: room.code, playerId: seated.id });
+
+    // A different opponent is a different series. Carrying the score forward
+    // would credit the newcomer with rounds someone else lost.
+    room.seriesWins.clear();
+    room.seriesDraws = 0;
+    room.seriesDecidedBy = null;
+    room.rematchVotes.clear();
+    room.drawOffer = null;
+    room.moves = [];
+    room.game = createInitialGame();
+    this.rotateRoomKey(room);
+
+    spectator.peer.send({
+      type: 'session.ready',
+      requestId,
+      ...this.sessionResult(room, seated, spectatorPeerId),
+    });
+    this.beginCountdown(room);
+    this.broadcastGame(room, requestId);
   }
 
   private allPlayersConnected(room: Room): boolean {
@@ -1700,29 +1929,29 @@ export class RoomManager {
    * Expired entries are dropped on the way past, so the ledger self-prunes on
    * the hot path and does not depend on the sweep timer for correctness.
    */
-  private recall(player: Player, requestId: string): LedgerOutcome | null {
+  private recall(holder: LedgerHolder, requestId: string): LedgerOutcome | null {
     const timestamp = this.now();
-    const entry = player.requests.get(requestId);
+    const entry = holder.requests.get(requestId);
     if (!entry) return null;
     if (timestamp - entry.at > REQUEST_LEDGER_TTL_MS) {
-      player.requests.delete(requestId);
+      holder.requests.delete(requestId);
       return null;
     }
     return entry.outcome;
   }
 
-  private remember(player: Player, requestId: string, outcome: LedgerOutcome = { kind: 'silent' }): void {
+  private remember(holder: LedgerHolder, requestId: string, outcome: LedgerOutcome = { kind: 'silent' }): void {
     const timestamp = this.now();
-    player.requests.set(requestId, { at: timestamp, outcome });
-    if (player.requests.size <= REQUEST_LEDGER_LIMIT) return;
-    for (const [key, entry] of player.requests) {
-      if (timestamp - entry.at > REQUEST_LEDGER_TTL_MS) player.requests.delete(key);
+    holder.requests.set(requestId, { at: timestamp, outcome });
+    if (holder.requests.size <= REQUEST_LEDGER_LIMIT) return;
+    for (const [key, entry] of holder.requests) {
+      if (timestamp - entry.at > REQUEST_LEDGER_TTL_MS) holder.requests.delete(key);
     }
     // Map preserves insertion order, so the front of the iterator is the oldest.
-    while (player.requests.size > REQUEST_LEDGER_LIMIT) {
-      const oldest = player.requests.keys().next().value;
+    while (holder.requests.size > REQUEST_LEDGER_LIMIT) {
+      const oldest = holder.requests.keys().next().value;
       if (oldest === undefined) break;
-      player.requests.delete(oldest);
+      holder.requests.delete(oldest);
     }
   }
 
@@ -1734,9 +1963,9 @@ export class RoomManager {
    * up indefinitely. A spammer exhausts the burst in one go and is then held to
    * the sustained rate, which is the whole point of P7-09.
    */
-  private checkRate(player: Player, bucket: RateBucket, capacity: number, refillPerSecond: number): void {
+  private checkRate(holder: RateHolder, bucket: RateBucket, capacity: number, refillPerSecond: number): void {
     const timestamp = this.now();
-    const state = player.rateLimits[bucket];
+    const state = holder.rateLimits[bucket];
     const elapsedSeconds = Math.max(0, timestamp - state.updatedAt) / 1_000;
     state.tokens = Math.min(capacity, state.tokens + elapsedSeconds * refillPerSecond);
     state.updatedAt = timestamp;

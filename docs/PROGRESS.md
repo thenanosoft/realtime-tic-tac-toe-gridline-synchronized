@@ -878,3 +878,47 @@ the accessible labels, and a second copy of it would drift from the first within
 Nothing is stored. The level and the record live in memory, because persisting them would mean a
 new browser-storage key and `tests/privacy.test.ts` would fail — correctly. The ladder resetting
 when you leave is the honest version of a product that says it leaves nothing behind.
+
+---
+
+## 2026-10-09 — Phase 13, part two: one link, and an audience that can take the chair
+
+Protocol v8. **264 unit tests** (up from 252) and seven new browser specs.
+
+The room used to be a pair with onlookers: the second arrival became a player, everyone after
+needed a different link, and watchers could see the board and nothing else. It is now a place with
+an audience that can join it.
+
+**One link, and roles decided inside the room.** Opening an invitation at a full room makes you a
+watcher rather than sending you back to the lobby to press "watch instead" — by opening the link
+you already said what you wanted, and which chair you get is the room's business. Typing a code by
+hand still offers the choice, because there the person may genuinely have meant to play.
+
+**The key goes with the link, which withdraws a guarantee** (D-015). D-011 said a watcher provably
+could not read an encrypted room's chat. One link for everyone makes that false, and it cannot be
+both ways: the key lives in the link. What is unchanged — and is the part the encryption is for —
+is that the server cannot read any of it. The circle grew from "the two people playing" to
+"everyone holding the link", which is what the share panel has said in those words since Phase 8.
+Spectator chat therefore defaults to **on**: withholding a conversation from people who already
+hold the key to it protects nothing.
+
+**Seating is between rounds, and the control says why when it is not available.** Swapping
+mid-round would hand someone a position they did not choose to enter; queueing the change until
+the round ended would spring a decision made minutes earlier on a room that had stopped expecting
+it. Seating starts a new series, because carrying the score forward would credit the newcomer with
+rounds somebody else lost.
+
+**Names travel with messages now.** They used to be looked up in the player list when a message
+was rendered, which stopped working the moment watchers could talk — and was already wrong for
+anyone seated out since they spoke. The server resolves the name when the message is stored, so
+what you said keeps your name on it whatever happens to you afterwards.
+
+Two things worth recording from the work. The chat paths all took a `Player`, so letting watchers
+speak meant either branching at every call site — which is how one of the two roles quietly ends
+up without a rate limit — or giving the paths the thing both roles are. They take a participant
+now, and the ledger and rate-bucket helpers were widened to match.
+
+And the stale-snapshot trap caught me for the fourth time: a test waited for "nobody watching",
+matched a snapshot from before the watcher ever arrived, and sent its command while the room was
+still full. The server was right; the test was asserting against history. Every socket helper in
+the suite now takes a cursor, and this one did too — I just used it in the wrong place.

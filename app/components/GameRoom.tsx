@@ -22,6 +22,7 @@ import { GameStatus } from './GameStatus';
 import { Countdown } from './Countdown';
 import { TurnClock } from './TurnClock';
 import { MatchPanel } from './MatchPanel';
+import { AudiencePanel } from './AudiencePanel';
 import { useGameSound } from '../hooks/useGameSound';
 import { ChatPanel } from './ChatPanel';
 import { InvitePanel } from './InvitePanel';
@@ -46,6 +47,8 @@ interface GameRoomProps {
   onFormat(format: { seriesTarget?: SeriesTarget; turnLimitMs?: TurnLimitMs | null }): void;
   onOfferDraw(): void;
   onRespondToDraw(accept: boolean): void;
+  onAskToPlay(wants: boolean): void;
+  onSeatWatcher(spectatorId: string): void;
   playSound: ReturnType<typeof useGameSound>['play'];
   chatMessages: ClientChatMessage[];
   typingPlayerId: string | null;
@@ -81,6 +84,8 @@ export function GameRoom({
   onFormat,
   onOfferDraw,
   onRespondToDraw,
+  onAskToPlay,
+  onSeatWatcher,
   playSound,
   chatMessages,
   typingPlayerId,
@@ -307,7 +312,7 @@ export function GameRoom({
             <h1>Room <b>{snapshot.roomCode}</b></h1>
           </div>
           <div className="room-actions">
-            {!watching && <button ref={chatToggleRef} className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
+            {(!watching || snapshot.spectatorPolicy.chat) && <button ref={chatToggleRef} className={`chat-toggle ${unread ? 'has-unread' : ''}`} onClick={openChat} aria-expanded={chatOpen} aria-controls="private-chat">
               <span aria-hidden="true">⌁</span>
               <span className="btn-label">Chat</span>
               {unread > 0 && <b aria-label={`${unread} unread messages`}>{unread}</b>}
@@ -336,6 +341,16 @@ export function GameRoom({
           onRespondToDraw={onRespondToDraw}
           onReplay={() => setReplayStep(0)}
           replaying={replaying}
+        />
+
+        <AudiencePanel
+          snapshot={snapshot}
+          viewerId={viewerId}
+          watching={watching}
+          isHost={Boolean(self?.isHost)}
+          canAct={hasControl && connection === 'connected'}
+          onAskToPlay={onAskToPlay}
+          onSeat={onSeatWatcher}
         />
 
         <div className="arena">
@@ -396,7 +411,7 @@ export function GameRoom({
         </div>
       </div>
       <div id="private-chat">
-        {!watching && <ChatPanel
+        {(!watching || snapshot.spectatorPolicy.chat) && <ChatPanel
           open={chatOpen}
           unread={unread}
           messages={chatMessages}
@@ -409,6 +424,7 @@ export function GameRoom({
           onSendText={onSendText}
           encrypted={snapshot.encryption.enabled}
           needsKey={needsKey}
+          watching={watching}
           onTyping={onTyping}
           onSticker={onSticker}
           onQuickReaction={onQuickReaction}

@@ -68,6 +68,7 @@ export function SoloRoom({ onLeave, playSound }: SoloRoomProps) {
     turnLimitMs: null,
     drawOffer: null,
     moves: [],
+    playRequests: [],
   };
 
   const headline = state.outcome === 'won'

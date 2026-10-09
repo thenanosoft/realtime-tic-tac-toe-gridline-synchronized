@@ -29,6 +29,9 @@ const KNOWN_MESSAGE_TYPES = new Set([
   'rematch.vote',
   'room.format',
   'draw.offer',
+  'room.request-play',
+  'room.withdraw-play',
+  'room.seat',
   'draw.respond',
   'session.claim',
   'room.spectate',
@@ -312,6 +315,15 @@ function dispatch(message: ClientMessage, peer: Peer, manager: RoomManager): voi
         seriesTarget: message.seriesTarget,
         turnLimitMs: message.turnLimitMs,
       });
+      return;
+    case 'room.request-play':
+      manager.requestToPlay(peer.id, message.requestId, true);
+      return;
+    case 'room.withdraw-play':
+      manager.requestToPlay(peer.id, message.requestId, false);
+      return;
+    case 'room.seat':
+      manager.seatSpectator(peer.id, message.requestId, message.spectatorId);
       return;
     case 'draw.offer':
       manager.offerDraw(peer.id, message.requestId);

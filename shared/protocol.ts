@@ -30,13 +30,18 @@ import type { Cell, Mark } from './game';
  *     server rather than counted by the client, a draw offer, and the move
  *     history a replay is built from. Adds `room.format`, `draw.offer`,
  *     `draw.respond`, `turn.expired` and `draw.declined`.
+ * 8 - a room is a place with an audience rather than a pair with onlookers.
+ *     Watchers can ask to play, the host seats them, and the player they
+ *     replace becomes a watcher. Chat carries its sender's name and role, so a
+ *     four-person conversation is readable. Adds `room.request-play`,
+ *     `room.withdraw-play` and `room.seat`.
  *
  * GitHub Pages and Render deploy independently, so a version skew window always
  * exists. The server therefore keeps accepting MIN_SUPPORTED_CLIENT_PROTOCOL for
  * one release cycle rather than cutting old clients off mid-match, and clients
  * compare against `server.hello` to tell the player to refresh.
  */
-export const PROTOCOL_VERSION = 7;
+export const PROTOCOL_VERSION = 8;
 /**
  * Raised to 2 in this release, deliberately.
  *
@@ -47,7 +52,7 @@ export const PROTOCOL_VERSION = 7;
  * honest behaviour. A v2 client, by contrast, is still fully served: every v2
  * command remains valid in v3.
  */
-export const MIN_SUPPORTED_CLIENT_PROTOCOL = 6;
+export const MIN_SUPPORTED_CLIENT_PROTOCOL = 7;
 export const LEGACY_CLIENT_PROTOCOL = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
@@ -163,6 +168,15 @@ export const clientMessageSchema = z.discriminatedUnion('type', [
     ...envelope,
   }).strict(),
   z.object({ type: z.literal('draw.offer'), requestId, ...envelope }).strict(),
+  /** A watcher asking for the next seat, and changing their mind. */
+  z.object({ type: z.literal('room.request-play'), requestId, ...envelope }).strict(),
+  z.object({ type: z.literal('room.withdraw-play'), requestId, ...envelope }).strict(),
+  /**
+   * The host seating a watcher. Identified by spectator id rather than by name:
+   * names are generated and readable, which makes them good for a person to
+   * choose by and bad for a command to be addressed with.
+   */
+  z.object({ type: z.literal('room.seat'), requestId, spectatorId: z.string().uuid(), ...envelope }).strict(),
   z.object({ type: z.literal('draw.respond'), requestId, accept: z.boolean(), ...envelope }).strict(),
   // "Take control here": moves the player slot to this connection. A separate
   // command rather than a client-side toggle, because two windows can race for
@@ -282,6 +296,12 @@ export interface DrawOfferSnapshot {
   round: number;
 }
 
+/** A watcher who has asked for the next seat (P13-07). */
+export interface PlayRequestSnapshot {
+  spectatorId: string;
+  name: string;
+}
+
 export interface SpectatorPolicy {
   /**
    * Spectators receive no chat at all by default. Withholding it on the wire
@@ -346,6 +366,12 @@ export interface RoomSnapshot {
   turnLimitMs: TurnLimitMs | null;
   drawOffer: DrawOfferSnapshot | null;
   /**
+   * Watchers asking to play, oldest first. Visible to everyone rather than to
+   * the host alone: a room is a shared place, and hiding who has put their
+   * hand up would make the host's choice look arbitrary to the people in it.
+   */
+  playRequests: PlayRequestSnapshot[];
+  /**
    * This round's moves in order, which is what a replay is built from. Held in
    * the snapshot rather than reconstructed by the client so a player who joined
    * late or reconnected can still replay the round they just watched.
@@ -383,6 +409,14 @@ export interface ChatReactionSnapshot {
 interface ChatMessageBase {
   id: string;
   senderId: string;
+  /**
+   * Resolved by the server when the message is stored, not looked up by the
+   * client (P13-09). With watchers in the conversation the sender may not be in
+   * the player list at all - and a player who has since been seated out would
+   * otherwise have their earlier messages lose their name.
+   */
+  senderName: string;
+  senderRole: Capability;
   createdAt: number;
   /**
    * Server-assigned position in the room's single chat event stream. Messages
@@ -443,6 +477,10 @@ export type RejectionCode =
   /** The connection lacks the capability this command requires. */
   | 'FORBIDDEN'
   | 'ROOM_NOT_FULL'
+  /** Seating someone cannot happen in the middle of a round. */
+  | 'ROUND_IN_PROGRESS'
+  /** The command is for a watcher and this connection is a player, or absent. */
+  | 'NOT_WATCHING'
   /** A draw response arrived with no offer outstanding. */
   | 'NO_DRAW_OFFER'
   /** The match format cannot be changed once the series is under way. */

@@ -92,11 +92,12 @@ exactly the leak a reading of the code would miss.
   Encryption covers what the two players say to each other.
 - **A plain room's chat is readable by the server** while the room exists. That is what the
   encryption option is for, and it is on by default for rooms opened from the lobby.
-- **A spectator holds no key**, so in an encrypted room they cannot read the conversation even
-  when the host has opened chat to them (D-011). The reverse is also true: opening chat to
-  spectators in a *plain* room does disclose it, which the control says.
-- **An invitation link is a bearer token.** Anyone who has it can read the conversation. The share
-  panel says so, in those words.
+- **Everyone holding the invitation link holds the room key**, watchers included (D-015, which
+  replaces the narrower D-011). The circle is "whoever has the link", not "the two people
+  playing". The server still cannot read any of it - that part is unchanged and is the part the
+  encryption is for.
+- **An invitation link is a bearer token.** Anyone who has it can read the conversation, and since
+  Phase 13 can also open it as a watcher. The share panel says so, in those words.
 - **`navigator.onLine` is not a security boundary** and is not used as one; it only explains why a
   socket failed (P11-09).
 

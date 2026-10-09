@@ -36,6 +36,7 @@ const current: RoomSnapshot = {
   turnLimitMs: 15_000,
   drawOffer: { byPlayerId: 'a', round: 1 },
   moves: [{ cell: 4, mark: 'X' }],
+  playRequests: [{ spectatorId: 'w1', name: 'VelvetLynx' }],
 };
 
 const without = (snapshot: RoomSnapshot, fields: Array<keyof RoomSnapshot>): RoomSnapshot => {

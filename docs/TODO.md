@@ -456,19 +456,29 @@ of [UX_AUDIT.md](./UX_AUDIT.md) - neither blocks anything shipped.
       record live in memory only: persisting them would mean a new browser-storage key, which the
       privacy audit would fail, correctly. The ladder resetting when you leave is the honest
       version of a product that claims to leave nothing behind.
-- [ ] **P13-04** One invitation link for everyone. Arriving at a full room makes you a watcher
-      instead of being refused, and no second link exists.
-- [ ] **P13-05** Watchers get the room key from the link like anyone else, and therefore a working
-      chat window. Replaces the narrower guarantee in D-011; the invite panel and the privacy
-      audit both say so plainly.
-- [ ] **P13-06** The live watcher count is visible to everyone in the room, not just in the
-      snapshot.
-- [ ] **P13-07** A watcher can ask to play, and withdraw the request. The host sees who is asking.
-- [ ] **P13-08** The host assigns a watcher to a seat for the next match; the player they replace
-      becomes a watcher, keeping their name and their place in the conversation.
-- [ ] **P13-09** Every chat message carries its sender's name and role, so a four-person room is
-      readable. Resolved by the server, not looked up client-side from a player list that no
-      longer contains everyone.
-- [ ] **P13-10** Tests: the perfect level never loses across every opening; one link produces the
-      right roles; promotion and demotion preserve the series score and the conversation; a
-      watcher's message is attributed correctly on every screen.
+- [x] **P13-04** Opening an invitation when the room is full makes you a watcher instead of
+      sending you back to the lobby to press "watch instead" — the decision was already made by
+      opening the link. Typing a room code by hand still offers the choice, because there the
+      person may well have meant to play.
+- [x] **P13-05** The link carries the key to whoever opens it, so watchers can read and write.
+      Spectator chat is now **on by default**, reversing the Phase 6 choice deliberately (D-015):
+      that default protected watchers from overhearing a room they could not otherwise reach, and
+      one link now carries everyone, so withholding it protects nothing and only makes the room
+      feel like two rooms. The host can still close it, and closing still withholds the frames
+      rather than hiding them in the UI.
+- [x] **P13-06** The count is in the room for everyone, players included.
+- [x] **P13-07** Asking twice is asking once, and keeps the original place — the queue is
+      ordered by who asked first, not by who asked most recently. A watcher who leaves takes their
+      request with them, or the host is offered a seat for somebody who is not in the room.
+- [x] **P13-08** Between rounds only, and the control is shown disabled with the reason rather
+      than hidden. Swapping mid-round would hand someone a position they did not choose to enter,
+      and queueing the change until the round ends would spring a decision made minutes earlier on
+      a room that had stopped expecting it. Seating starts a **new series**: carrying the score
+      forward would credit the newcomer with rounds somebody else lost.
+- [x] **P13-09** Resolved by the server when the message is stored, not looked up when it is
+      read. The sender may be a watcher who was never in the player list, or a player who has
+      since been seated out — and their earlier words should not lose their name because of what
+      happened to them afterwards.
+- [x] **P13-10** 264 unit tests and 7 new browser specs, including the whole flow end to end:
+      one link opened four times, a watcher asking, the host seating them between rounds, and the
+      conversation staying attributed across the swap.

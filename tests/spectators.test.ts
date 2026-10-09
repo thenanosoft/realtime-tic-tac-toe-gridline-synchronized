@@ -36,6 +36,10 @@ class Socket {
     this.socket.send(JSON.stringify({ ...message, protocolVersion: PROTOCOL_VERSION }));
   }
 
+  cursor(): number {
+    return this.messages.length;
+  }
+
   of<T extends ServerMessage['type']>(type: T): Array<Extract<ServerMessage, { type: T }>> {
     return this.messages.filter((m): m is Extract<ServerMessage, { type: T }> => m.type === type);
   }
@@ -196,12 +200,15 @@ describe('spectators and capabilities (Phase 6)', () => {
       expect(o.snapshot().board.every((cell) => cell === null)).toBe(true);
     });
 
-    it('refuses chat, reactions and rematch votes from a spectator', async () => {
+    it('refuses moves, quick reactions and rematch votes from a spectator', async () => {
       const { xSession } = await match();
       const { viewer } = await watch(xSession.roomCode);
 
+      // Chat is no longer on this list: watchers talk now (P13-05). What they
+      // still cannot do is anything that touches the *match* - the board, the
+      // rematch, the player slot - or the reaction that animates from a
+      // player's side of the arena and has no origin for a watcher.
       const attempts: ClientMessage[] = [
-        { type: 'chat.message', requestId: 'c', text: 'let me in' },
         { type: 'chat.quick-reaction', requestId: 'q', reaction: '🔥' },
         { type: 'rematch.vote', requestId: 'r' },
         { type: 'session.claim', requestId: 's' },
@@ -216,10 +223,30 @@ describe('spectators and capabilities (Phase 6)', () => {
   });
 
   describe('spectator privacy is enforced on the wire (P6-05)', () => {
-    it('sends a watcher no chat at all under the default policy', async () => {
+    it('includes a watcher in the conversation by default (P13-05)', async () => {
+      // Reversed in Phase 13, deliberately. The Phase 6 default protected
+      // watchers from overhearing a room they could not otherwise reach - but
+      // one link now carries everyone, so withholding the conversation from
+      // them protects nothing and only makes the room feel like two rooms.
+      const { x, xSession } = await match();
+      const { viewer } = await watch(xSession.roomCode);
+      expect(viewer.snapshot().spectatorPolicy.chat).toBe(true);
+
+      x.send({ type: 'chat.message', requestId: 'shared', text: 'welcome in' });
+      const seen = await viewer.waitFor(isChat);
+      expect(seen.message.kind === 'text' && seen.message.text).toBe('welcome in');
+      // And it carries who said it, which is what makes a four-person room
+      // readable (P13-09).
+      expect(seen.message.senderName).toBe(xSession.displayName);
+      expect(seen.message.senderRole).toBe('player');
+    });
+
+    it('withholds everything on the wire once the host closes it', async () => {
       const { x, o, xSession } = await match();
       const { viewer } = await watch(xSession.roomCode);
-      expect(viewer.snapshot().spectatorPolicy.chat).toBe(false);
+      x.send({ type: 'room.policy', requestId: 'close', spectatorChat: false });
+      await viewer.waitFor(snapshotWhere((s) => !s.spectatorPolicy.chat));
+      const from = viewer.cursor();
 
       x.send({ type: 'chat.message', requestId: 'private', text: 'a private note' });
       await o.waitFor(isChat);
@@ -229,27 +256,28 @@ describe('spectators and capabilities (Phase 6)', () => {
 
       // Read off the socket, not the screen: the frames never arrive, so there
       // is nothing for a patched client to reveal.
-      expect(viewer.of('chat.message')).toHaveLength(0);
+      expect(viewer.messages.slice(from).filter((m) => m.type === 'chat.message')).toHaveLength(0);
       expect(viewer.of('chat.typing')).toHaveLength(0);
       expect(viewer.of('chat.quick-reaction')).toHaveLength(0);
-      const raw = JSON.stringify(viewer.messages);
-      expect(raw).not.toContain('a private note');
+      expect(JSON.stringify(viewer.messages)).not.toContain('a private note');
 
       // Meanwhile the players' own conversation is unaffected.
       expect(o.of('chat.message')).toHaveLength(1);
     });
 
-    it('lets the host open chat to watchers, and only the host (P6-06)', async () => {
+    it('lets the host close and reopen it, and only the host (P6-06)', async () => {
       const { x, o, xSession, oSession } = await match();
       const { viewer } = await watch(xSession.roomCode);
 
       // The guest is not the host, whatever they claim.
-      o.send({ type: 'room.policy', requestId: 'not-host', spectatorChat: true });
+      o.send({ type: 'room.policy', requestId: 'not-host', spectatorChat: false });
       const refusal = await o.waitFor(isRejection);
       expect(refusal.code).toBe('FORBIDDEN');
       expect(refusal.message).toMatch(/host/i);
       expect(oSession.snapshot.players.find((p) => p.id === oSession.playerId)?.isHost).toBe(false);
 
+      x.send({ type: 'room.policy', requestId: 'close-chat', spectatorChat: false });
+      await viewer.waitFor(snapshotWhere((s) => !s.spectatorPolicy.chat));
       x.send({ type: 'room.policy', requestId: 'open-chat', spectatorChat: true });
       await viewer.waitFor(snapshotWhere((s) => s.spectatorPolicy.chat));
 

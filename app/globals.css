@@ -1796,3 +1796,71 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   .solo-opponent .player-card h2 { margin: 0; }
   .solo-blurb { display: none; }
 }
+
+/* --- The audience (Phase 13) --------------------------------------------- */
+
+.audience-panel {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 0 0 14px;
+  padding: 9px 15px;
+  border: 1px solid var(--line-faint);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, .012);
+}
+.audience-count { display: flex; align-items: baseline; gap: 7px; }
+.audience-count > span { color: var(--o); }
+.audience-count strong { color: var(--ink); font-size: var(--text-sm); font-weight: 650; font-variant-numeric: tabular-nums; }
+.audience-count small { color: #85877f; font-size: var(--text-micro); font-weight: 600; letter-spacing: .12em; text-transform: uppercase; }
+.audience-hint { margin: 0; color: #85877f; font-size: var(--text-2xs); }
+
+.ask-to-play {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, .025);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.ask-to-play:hover { border-color: var(--line-bright); }
+.ask-to-play.is-waiting { color: var(--signal); border-color: rgba(var(--signal-rgb), .3); background: rgba(var(--signal-rgb), .07); }
+
+.play-queue { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.play-queue li { display: flex; align-items: center; gap: 7px; padding: 4px 9px 4px 6px; border: 1px solid var(--line-faint); border-radius: 999px; }
+.queue-position { display: grid; place-items: center; width: 19px; height: 19px; border-radius: 50%; background: rgba(255, 255, 255, .05); color: #b6b5af; font-size: var(--text-micro); font-weight: 700; }
+.queue-name { color: var(--ink); font-size: var(--text-2xs); font-weight: 600; }
+.seat-watcher {
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(var(--signal-rgb), .28);
+  border-radius: 8px;
+  color: #11130d;
+  background: var(--signal);
+  font-size: var(--text-micro);
+  font-weight: 700;
+  cursor: pointer;
+}
+.seat-watcher:disabled { color: #85877f; border-color: var(--line); background: transparent; cursor: default; }
+
+/* Who said it, and from where. A four-person room needs both. */
+.sender-role {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid rgba(var(--o-rgb), .28);
+  border-radius: 999px;
+  color: var(--o);
+  font-size: var(--text-micro);
+  font-weight: 600;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+
+@media (max-width: 720px) {
+  .audience-panel { margin-bottom: 11px; padding: 8px 12px; }
+}
