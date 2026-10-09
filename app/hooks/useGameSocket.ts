@@ -31,6 +31,7 @@ import {
   sealText,
 } from '../lib/crypto';
 import { buildInviteUrl, readInvite, shareInvite, type ShareOutcome } from '../lib/invite';
+import { timingWithDefaults, withProtocolDefaults } from '../lib/snapshotCompat';
 import { prepareChatImage, ImagePreparationError } from '../lib/images';
 import { evaluateServerHello } from '../lib/protocolCompatibility';
 import { insertMessage, shouldApplyOverwrite, shouldApplySnapshot } from '../lib/ordering';
@@ -362,7 +363,11 @@ export function useGameSocket() {
     }
   }, []);
 
-  const acceptSnapshot = useCallback((incoming: RoomSnapshot, incomingTiming: RoomTiming) => {
+  const acceptSnapshot = useCallback((raw: RoomSnapshot, rawTiming: RoomTiming) => {
+    // Normalised at the door, so every component downstream can rely on the
+    // current shape even while an older server is still deploying (D-008).
+    const incoming = withProtocolDefaults(raw);
+    const incomingTiming = timingWithDefaults(rawTiming);
     // Never apply an update that is not strictly newer than what we hold. A
     // reconnect can deliver a resume snapshot and a live broadcast out of order,
     // and without this an older board would overwrite a newer one (INV-4).

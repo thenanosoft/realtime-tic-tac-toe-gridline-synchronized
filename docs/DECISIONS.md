@@ -321,3 +321,30 @@ something and the other waiting for an answer to an offer that was already answe
 
 **Consequence.** A repeated offer from the *same* player is deliberately not refreshed, so
 re-offering cannot become a way to pester an opponent with a prompt they have to dismiss.
+
+## D-014 — The client fills in what an older server omits · **DECIDED** · 2026-10-09
+
+**Context.** D-008 settled that the two deploys cannot be sequenced, so a current client always
+meets the previous server for a few minutes after a release, and the client must degrade honestly.
+`evaluateServerHello` has handled the *announcement* since Phase 2 — "a newer version is live,
+refresh when convenient" — and the match continues.
+
+What had not been handled was the data. Protocol 7 added `series`, `turnLimitMs`, `drawOffer` and
+`moves` to the room snapshot, and the match panel read `snapshot.series.target` directly. Against a
+protocol-6 server that is a thrown TypeError and a blank page: the least honest degradation
+available, and the opposite of what the handshake had just promised.
+
+**Decision.** Every snapshot is normalised at the single point where it enters the client
+(`withProtocolDefaults`), with a default for every field added since the oldest server still
+accepted. Defaults make the feature *absent* rather than wrong — no series, no turn limit, no
+offer, no replay — so a feature the server does not have looks like one nobody has turned on.
+
+**Rejected:** optional chaining in the components. It spreads one question across the codebase
+and gets answered differently each time, and the day a component forgets is the day the page goes
+blank again.
+
+**Consequence.** Every future protocol addition owes a default here and a case in
+`tests/snapshotCompat.test.ts`, which builds the older shapes by *deleting* fields so the test
+states exactly what each older server omits. Note the defaults use `??` rather than `||`: with
+`||`, "encryption is off" and "no attachments" would become "the server did not say", which is a
+different claim.
