@@ -11,9 +11,10 @@ interface LobbyProps {
   onCreate(options?: { encrypted?: boolean }): void;
   onJoin(code: string): void;
   onSpectate(code: string): void;
+  onSolo(): void;
 }
 
-export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpectate }: LobbyProps) {
+export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpectate, onSolo }: LobbyProps) {
   const [code, setCode] = useState('');
   // On by default. A room that is private only when you remember to ask is a
   // room that is usually not private.
@@ -75,6 +76,14 @@ export function Lobby({ connection, busy, fullRoomCode, onCreate, onJoin, onSpec
             <button className="join-button" disabled={unavailable}>Join</button>
           </form>
         </div>
+        <p className="solo-offer">
+          <span aria-hidden="true">◇</span>
+          No one around?
+          {/* Deliberately not disabled when the socket is down: a solo game
+              needs no connection, and offering it precisely when there is no
+              connection is the point. */}
+          <button onClick={onSolo}>Play the computer</button>
+        </p>
         {fullRoomCode && (
           // A full room is not a dead end. Offered rather than done automatically:
           // watching is a different thing from playing and should be chosen.

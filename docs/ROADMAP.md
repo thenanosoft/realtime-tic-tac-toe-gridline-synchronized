@@ -360,3 +360,41 @@ templates and must be hand-written.
 
 **Risk.** Low technically; high in that it may surface work belonging to earlier phases.
 Time is reserved for that.
+---
+
+## Phase 13 — Solo play, and a room with an audience that can join it
+
+**Goal.** Two things the product could not do: play without a second person, and let the people
+watching become the people playing.
+
+**Scope.** `P13-01` … `P13-10`
+
+- **Solo against the computer**, with difficulty that rises as you win. Run entirely in the
+  browser: a solo game has no second person in it, so it has no business opening a room, holding
+  a socket, or putting a board on a server.
+- **One link for everyone.** Today the second arrival becomes the player and everyone after needs
+  a different link. Instead the link carries the room, the key and nothing about roles — who plays
+  is decided inside the room.
+- **Watchers are participants, not an audience.** They see how many of them there are, they can
+  ask to play, and they have a chat window of their own.
+- **The host decides.** Requests to play are listed for the host, who picks one for the next
+  match; the player they replace becomes a watcher.
+- **Everyone's name on everything they say**, so a conversation with four people in it is
+  readable.
+
+**The security consequence, stated up front.** Watchers can only read an encrypted room's chat if
+they hold the room key, and the key travels in the link. One link for everyone therefore means
+*anyone with the link can read the conversation* — this replaces the narrower promise of D-011,
+where a watcher provably could not. It is the user's call and it is the only shape in which
+watcher chat and end-to-end encryption can both exist. The invitation panel says so in those
+words, and the audit is updated to match rather than quietly weakened.
+
+**Exit criteria.**
+- A solo game is playable with no network at all, and the hardest level never loses.
+- One link, opened four times, yields two players and two watchers with the host in control of
+  which is which.
+- A promoted watcher and a demoted player swap cleanly mid-series, with the score surviving.
+- Every message in a four-person room shows who sent it, including watchers.
+
+**Risk.** Medium-high. Promotion touches the player-slot machinery from Phase 4 and the capability
+model from Phase 6 at the same time, which is where this can go wrong quietly.

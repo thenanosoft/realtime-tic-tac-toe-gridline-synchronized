@@ -434,3 +434,41 @@ of [UX_AUDIT.md](./UX_AUDIT.md) - neither blocks anything shipped.
 - [x] **P12-08** [`docs/PRIVACY_AUDIT.md`](./PRIVACY_AUDIT.md), written as evidence: every claim
       names a file you can read or a test you can run, the known limits are stated plainly rather
       than omitted, and the last section is how to re-run the whole thing.
+---
+
+## Phase 13 — Solo play, and a room with an audience that can join it
+
+- [x] **P13-01** Runs entirely in the browser: no room, no socket, no board on a server. A solo
+      game has no second person in it, so there is nothing for an authority to arbitrate — and the
+      room machinery never has to learn about a player who is not a person. It works with the
+      network off, which is also when it is most wanted, and the offer is shown even while the
+      connection is down.
+- [x] **P13-02** Four levels that decide in different terms rather than one engine behind a dial:
+      Casual does not look ahead at all, Keen looks exactly one move ahead, Sharp searches and
+      slips once in five, Flawless searches. A single strong engine with a "mistake chance" plays
+      perfectly and then throws the game away, which reads as a cheat rather than as a weaker
+      opponent — so Sharp's slip is the best of what is left after discarding the strongest move,
+      not a random cell. **Flawless is proved unbeatable by playing every game a human could
+      play against it**, not by playing it a few times. Minimax scores by depth, so it takes a win
+      now over the same win in three moves — without that it looks like it is toying with you.
+- [x] **P13-03** Winning steps up, losing steps back, a draw holds — against the top level a draw
+      is the best result there is, and demoting someone for it would be absurd. The level and the
+      record live in memory only: persisting them would mean a new browser-storage key, which the
+      privacy audit would fail, correctly. The ladder resetting when you leave is the honest
+      version of a product that claims to leave nothing behind.
+- [ ] **P13-04** One invitation link for everyone. Arriving at a full room makes you a watcher
+      instead of being refused, and no second link exists.
+- [ ] **P13-05** Watchers get the room key from the link like anyone else, and therefore a working
+      chat window. Replaces the narrower guarantee in D-011; the invite panel and the privacy
+      audit both say so plainly.
+- [ ] **P13-06** The live watcher count is visible to everyone in the room, not just in the
+      snapshot.
+- [ ] **P13-07** A watcher can ask to play, and withdraw the request. The host sees who is asking.
+- [ ] **P13-08** The host assigns a watcher to a seat for the next match; the player they replace
+      becomes a watcher, keeping their name and their place in the conversation.
+- [ ] **P13-09** Every chat message carries its sender's name and role, so a four-person room is
+      readable. Resolved by the server, not looked up client-side from a player list that no
+      longer contains everyone.
+- [ ] **P13-10** Tests: the perfect level never loses across every opening; one link produces the
+      right roles; promotion and demotion preserve the series score and the conversation; a
+      watcher's message is attributed correctly on every screen.

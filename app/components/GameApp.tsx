@@ -4,12 +4,18 @@ import { Announcer } from './Announcer';
 import { ConnectionBadge } from './ConnectionBadge';
 import { Lobby } from './Lobby';
 import { GameRoom } from './GameRoom';
+import { useState } from 'react';
+import { SoloRoom } from './SoloRoom';
 import { useGameSocket } from '../hooks/useGameSocket';
 import { useGameSound } from '../hooks/useGameSound';
 
 export function GameApp() {
   const game = useGameSocket();
   const sound = useGameSound();
+  // Solo is a different screen rather than a different kind of room: it has no
+  // socket, no room code and nothing to share, and modelling it as a room would
+  // mean teaching the room machinery about a player who is not a person.
+  const [solo, setSolo] = useState(false);
 
   return (
     <main className="app-shell">
@@ -43,7 +49,10 @@ export function GameApp() {
           </div>
         </div>
       )}
-      {!game.session && !game.spectator && (
+      {solo && !game.session && !game.spectator && (
+        <SoloRoom onLeave={() => setSolo(false)} playSound={sound.play} />
+      )}
+      {!solo && !game.session && !game.spectator && (
         <Lobby
           connection={game.connection}
           busy={game.lobbyBusy}
@@ -51,6 +60,7 @@ export function GameApp() {
           onCreate={game.createRoom}
           onJoin={game.joinRoom}
           onSpectate={game.spectateRoom}
+          onSolo={() => setSolo(true)}
         />
       )}
       {(game.session || game.spectator) && game.snapshot && (

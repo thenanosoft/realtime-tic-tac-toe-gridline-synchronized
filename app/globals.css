@@ -1739,3 +1739,60 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 
 .code-note { display: flex; gap: 8px; margin: 12px 0 0; color: #b6b5af; font-size: var(--text-2xs); line-height: 1.5; }
 .code-note > span { color: var(--signal); }
+
+/* --- Solo play (Phase 13) ------------------------------------------------ */
+
+.solo-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 9px;
+  margin: 14px 0 0;
+  color: #b6b5af;
+  font-size: var(--text-2xs);
+}
+.solo-offer > span { color: var(--o); }
+.solo-offer button {
+  min-height: 34px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, .025);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color .16s var(--ease-fast), border-color .16s var(--ease-fast), background .16s var(--ease-fast);
+}
+.solo-offer button:hover { border-color: var(--line-bright); background: rgba(255, 255, 255, .05); }
+
+/* Two columns rather than three: there is no second player to seat opposite. */
+.solo-arena { display: grid; grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); align-items: start; gap: clamp(16px, 2.4vw, 38px); }
+.solo-opponent { position: sticky; top: 96px; }
+.solo-blurb { margin: 8px 0 0; color: #b6b5af; font-size: var(--text-2xs); line-height: 1.5; }
+
+.level-picker { display: flex; align-items: center; gap: 6px; margin: 0; padding: 0; border: 0; }
+.level-picker button {
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: #b6b5af;
+  background: transparent;
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.level-picker button:hover { color: var(--ink); border-color: var(--line-bright); }
+.level-picker button.is-active { color: var(--signal); border-color: rgba(var(--signal-rgb), .3); background: rgba(var(--signal-rgb), .07); }
+
+.game-status.tone-won { border-color: rgba(var(--signal-rgb), .26); }
+.game-status.tone-lost { border-color: rgba(var(--x-rgb), .22); }
+
+@media (max-width: 860px) {
+  .solo-arena { grid-template-columns: minmax(0, 1fr); }
+  .solo-opponent { position: static; }
+  .solo-opponent .player-card { display: flex; align-items: center; gap: 14px; }
+  .solo-opponent .player-card h2 { margin: 0; }
+  .solo-blurb { display: none; }
+}

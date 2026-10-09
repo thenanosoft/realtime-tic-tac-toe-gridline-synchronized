@@ -840,3 +840,41 @@ chrome around the board gives up more height and the board is sized from what is
 One test was also measuring the wrong thing: cell geometry in viewport coordinates reported a
 one-off scroll as a moving board, once the room grew past the window. It measures against the
 board frame now, which is what P1-02 was always about.
+
+---
+
+## 2026-10-09 — Phase 13, part one: an opponent that is not a person
+
+Branch `phase/13-solo-and-audience`. **251 unit tests** (up from 236) and four new Playwright
+specs. No protocol change — deliberately.
+
+A solo game has no second person in it, so it opens no room, holds no socket and puts no board on
+a server. That decision kept the whole feature out of the room machinery, which otherwise would
+have had to grow a notion of a player who is not a person: presence for something that is never
+offline, a reconnect deadline for something that never disconnects, a chat partner that never
+types. It also means solo play works with the network down, which is exactly when someone is most
+likely to want it — so the offer stays visible while the connection is gone.
+
+**Four levels that think in different terms**, not one engine behind a difficulty dial. A strong
+engine with a "mistake chance" plays perfectly and then throws the game away at random, which
+reads as a cheat rather than as a weaker player. Casual does not look ahead at all. Keen looks
+exactly one move ahead — it will take a win and block a loss and miss a fork, which is a specific
+weakness rather than a general one. Sharp searches and slips once in five, and the slip is the
+best of what is left after discarding the strongest move, so a player who loses feels outplayed
+rather than pitied. Flawless searches.
+
+**"Unbeatable" is the kind of claim that deserves a proof rather than a demonstration.** The test
+plays every game a human could play against Flawless — the whole tree of human choices against a
+deterministic reply — and asserts no leaf is a human win, from both openings. Two smaller things
+fell out of writing it: minimax has to score by depth or it will happily take a win in five moves
+over the same win in one, which from the other side of the board looks like being toyed with; and
+in a position where every move is equally good there is nothing for Sharp to slip *into*, so the
+first version of that test was asserting a slip in a position that did not admit one.
+
+The screen renders the real `GameBoard` by building a snapshot of the shape the server sends.
+That assembly is worth it: the board carries the keyboard handling, the winning-line geometry and
+the accessible labels, and a second copy of it would drift from the first within a release.
+
+Nothing is stored. The level and the record live in memory, because persisting them would mean a
+new browser-storage key and `tests/privacy.test.ts` would fail — correctly. The ladder resetting
+when you leave is the honest version of a product that says it leaves nothing behind.
