@@ -169,16 +169,32 @@ describe('protocol v2', () => {
       expect(session.roomCode).toMatch(/^[A-HJ-NP-Z2-9]{6}$/);
     });
 
-    it('rejects a client claiming a newer protocol than the server speaks', async () => {
+    it('serves a client one version ahead, because that is the live site mid-deploy', async () => {
+      // Pages deploys faster than Render, so for a few minutes after every
+      // protocol release the live page is a version ahead of the live server.
+      // Refusing it takes the product down for the length of a deploy, which is
+      // a worse failure than the one it guards against (D-016).
       const probe = await connect();
       probe.sendRaw(JSON.stringify({
         type: 'room.create',
-        requestId: 'future',
+        requestId: 'tomorrow',
         protocolVersion: PROTOCOL_VERSION + 1,
+      }));
+      const session = await probe.waitFor(isSession);
+      expect(session.requestId).toBe('tomorrow');
+      expect(probe.of('command.rejected')).toHaveLength(0);
+    });
+
+    it('still refuses a client two versions ahead, which is a guess about code that does not exist', async () => {
+      const probe = await connect();
+      probe.sendRaw(JSON.stringify({
+        type: 'room.create',
+        requestId: 'far-future',
+        protocolVersion: PROTOCOL_VERSION + 2,
       }));
       const rejection = await probe.waitFor(isRejection);
       expect(rejection.code).toBe('PROTOCOL_MISMATCH');
-      expect(rejection.requestId).toBe('future');
+      expect(rejection.requestId).toBe('far-future');
       expect(probe.of('session.ready')).toHaveLength(0);
     });
 

@@ -12,6 +12,12 @@ export type CompatibilityVerdict =
   /** Versions differ but both ends can still talk. Worth a nudge, not a stop. */
   | { kind: 'outdated-client'; message: string }
   /**
+   * This page is newer than the service it is talking to - the normal state for
+   * a few minutes after a release, because Pages deploys faster than Render.
+   * Nothing the player can do, and nothing they need to do.
+   */
+  | { kind: 'updating-server'; message: string }
+  /**
    * The server no longer supports this client's protocol. Reconnecting cannot
    * fix that, so the caller must stop retrying and say so plainly.
    */
@@ -46,6 +52,15 @@ export function evaluateServerHello(
     return {
       kind: 'unsupported-client',
       message: 'This page is out of date. Refresh to reconnect to the realtime service.',
+    };
+  }
+
+  if (serverProtocol < clientProtocol) {
+    // Telling this player to refresh would be wrong twice over: refreshing
+    // changes nothing, and the thing that is out of date is not their page.
+    return {
+      kind: 'updating-server',
+      message: 'The realtime service is still updating. A few of the newest features may not work for a minute.',
     };
   }
 

@@ -54,6 +54,21 @@ export const PROTOCOL_VERSION = 8;
  */
 export const MIN_SUPPORTED_CLIENT_PROTOCOL = 7;
 export const LEGACY_CLIENT_PROTOCOL = 1;
+/**
+ * How far ahead of the server a client may be and still be served (D-016).
+ *
+ * Pages deploys in a couple of minutes and Render takes longer, so after every
+ * protocol release there is a window in which the live site is a version ahead
+ * of the live server. Refusing those clients outright - which is what the
+ * server used to do - takes the whole product down for the length of a deploy,
+ * which is a worse failure than the one it was guarding against.
+ *
+ * One version, not unbounded: the client fills in snapshot fields an older
+ * server omits and the server refuses commands it does not know, so a single
+ * step degrades cleanly. Two steps is a guess about code that does not exist
+ * yet.
+ */
+export const MAX_CLIENT_PROTOCOL_AHEAD = 1;
 
 export const ROOM_CODE_PATTERN = /^[A-HJ-NP-Z2-9]{6}$/;
 export const MAX_CHAT_TEXT_LENGTH = 1_000;

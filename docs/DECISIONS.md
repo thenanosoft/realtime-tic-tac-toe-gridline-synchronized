@@ -375,3 +375,30 @@ a conversation from people who already hold the key to it, which protects nothin
 room with an audience feel like two rooms. The host can still close it, and closing still
 withholds the frames at the server rather than hiding them in the UI (INV-10). `docs/
 PRIVACY_AUDIT.md` states the wider circle plainly rather than leaving the old wording to rot.
+
+## D-016 — The server serves a client one version ahead of itself · **DECIDED** · 2026-10-09
+
+**Context.** D-008 established that the two deploys cannot be sequenced. What it did not settle is
+what the server should do in the window it creates. GitHub Pages publishes in about two minutes;
+Render takes longer. So after every protocol release there is a period where the live page speaks
+version *n* and the live server speaks *n-1* — and the server refused those clients outright with
+`PROTOCOL_MISMATCH`.
+
+That is a worse failure than the one it guards against: for the length of a backend deploy, the
+product does not work at all, and the message the player sees invites them to refresh, which
+cannot help. Phase 13 made it concrete — protocol 8 shipped to Pages and the live site stopped
+working until Render caught up.
+
+**Decision.** The server accepts a client up to `MAX_CLIENT_PROTOCOL_AHEAD` (one) version newer
+than itself. A client further ahead is still refused.
+
+**Why one, and not unbounded.** A single step degrades cleanly because both halves of it already
+exist: the client fills in snapshot fields an older server omits (D-014), and the server refuses
+commands it does not recognise one at a time rather than dropping the connection. Two steps is a
+guess about code that has not been written. One version is the width of the window the deploy
+actually creates.
+
+**Consequence.** The client-ahead case now gets its own verdict — *the realtime service is still
+updating* — instead of being told to refresh, which would have been wrong twice over: refreshing
+changes nothing, and the thing out of date is not their page. This change only helps from the
+deploy *after* the one that introduces it; the window it was written for had to be waited out.

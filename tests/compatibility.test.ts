@@ -41,11 +41,14 @@ describe('protocol compatibility matrix (P2-10)', () => {
     expect(verdict.kind !== 'compatible' && verdict.message).toMatch(/out of date/i);
   });
 
-  it('nudges rather than stopping when the client is ahead of the server', () => {
-    // Possible when Pages deploys before Render. The client is newer, but the
-    // server still accepts the older protocol, so the session continues.
+  it('says the service is updating when the client is ahead of the server', () => {
+    // The normal state for a few minutes after a release: Pages deploys faster
+    // than Render, so the live page is a version ahead of the live server.
     const verdict = evaluateServerHello(hello(PROTOCOL_VERSION - 1, MIN_SUPPORTED_CLIENT_PROTOCOL), PROTOCOL_VERSION);
-    expect(verdict.kind).toBe('outdated-client');
+    expect(verdict.kind).toBe('updating-server');
+    // Telling this player to refresh would be wrong twice over: refreshing
+    // changes nothing, and the thing out of date is not their page.
+    expect(verdict.kind === 'updating-server' && verdict.message).not.toMatch(/refresh/i);
   });
 
   it('ignores a missing minClientProtocol instead of assuming the worst', () => {

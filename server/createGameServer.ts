@@ -4,6 +4,7 @@ import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import {
   clientMessageSchema,
   LEGACY_CLIENT_PROTOCOL,
+  MAX_CLIENT_PROTOCOL_AHEAD,
   MIN_SUPPORTED_CLIENT_PROTOCOL,
   PROTOCOL_VERSION,
   type ClientMessage,
@@ -258,7 +259,12 @@ export function executeClientMessage(message: ClientMessage, peer: Peer, manager
   // within the supported range, because Pages and Render deploy independently
   // and a skew window always exists (D-004).
   const clientProtocol = message.protocolVersion ?? LEGACY_CLIENT_PROTOCOL;
-  if (clientProtocol < MIN_SUPPORTED_CLIENT_PROTOCOL || clientProtocol > PROTOCOL_VERSION) {
+  // A client one version ahead is served rather than refused (D-016). It is
+  // the live site talking to a server that is still deploying, it fills in the
+  // fields this version does not send, and anything it asks for that does not
+  // exist here is refused command by command - which is a far smaller failure
+  // than taking the product down for the length of a deploy.
+  if (clientProtocol < MIN_SUPPORTED_CLIENT_PROTOCOL || clientProtocol > PROTOCOL_VERSION + MAX_CLIENT_PROTOCOL_AHEAD) {
     reject(
       peer,
       requestId,
