@@ -796,3 +796,47 @@ build, and it makes an offline app look like a working one.
 by typing the room code holds no key — so their messages were refused on send, silently, leaving
 the text sitting in the box. The composer now refuses up front and says why, the lobby says what a
 code does and does not carry, and the E2E harness joins by link, the way an invitee actually does.
+
+---
+
+## 2026-10-09 — Phase 12 closed: the claims now have tests behind them
+
+Branch `phase/12-privacy-audit`. **231 unit tests** (up from 213, plus the matrix skipped by
+default) and 28 Playwright specs. No protocol change. This closes the programme.
+
+The phase's whole premise is that an assertion about privacy is worth nothing without something
+that fails when it stops being true. So the audit is a test file, not a document — one rule per
+category of persistence, each with an allowlist — and `docs/PRIVACY_AUDIT.md` is the readable
+version of what that file enforces, with every claim naming a file or a test.
+
+**The log audit is a capture, not a reading.** It plays a full match — sealed text, a sticker, a
+reaction, a sealed image over the chunked transport, five moves — with every console channel and
+the raw stdout/stderr writes intercepted, then searches the output. Two details matter. It
+provokes the error paths too, because an error handler that serialises the frame it choked on is
+exactly the leak a code review misses. And it asserts the output is **empty**: "it did not log the
+secret" is a weaker claim than "it did not log", and the second is the one this product makes.
+
+**Two of my own rules caught me.** The filesystem rule flagged `scripts/verify-production.mjs`,
+which reads source to find the protocol version — a legitimate build-time read that now sits in
+the allowlist with its reason. And the no-room-content rule flagged `error.message` in the server
+entry point, which is an Error's message rather than a chat message; the rule now looks for room
+vocabulary instead of the word "message". Both are exactly what an allowlist is for: the rule
+forced the exception to be named.
+
+**`context.setOffline` is the wrong tool for a network-interruption test**, and finding that out
+was worth the detour. It drops the link without closing an open socket, so the server never learns
+the player has gone and the opponent sees nothing at all — the test would have passed while
+proving the opposite of its name. `e2e/support/cutSocket.ts` closes the socket from inside the
+page and refuses new connections until restored, which is an interruption the server actually
+sees: presence changes, the room pauses, and the board is held exactly as it was.
+
+**Testing Phase 12 found two Phase 9-11 regressions**, which is the risk the roadmap reserved time
+for. The board had started moving as marks landed — not the old row-sizing bug, but the match
+panel growing and shrinking above it as its contents changed. The panel is now one fixed-height
+row with the format controls in a popover laid over the arena rather than above it. And the
+landscape layout had overflowed by 82px as the panel and the identity block were added, so the
+chrome around the board gives up more height and the board is sized from what is left.
+
+One test was also measuring the wrong thing: cell geometry in viewport coordinates reported a
+one-off scroll as a moving board, once the room grew past the window. It measures against the
+board frame now, which is what P1-02 was always about.

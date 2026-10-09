@@ -391,17 +391,41 @@ Status: `[ ]` not started · `[~]` in progress · `[x]` done and tested · `[!]`
 
 ## Phase 12 — Privacy audit, log audit and full E2E
 
-- [ ] **P12-01** Repository audit: every occurrence of `localStorage`, `sessionStorage`,
-      IndexedDB, `fs` writes, database clients, object storage and analytics, with a verdict
-      on each.
-- [ ] **P12-02** Runtime audit: confirm no temporary upload directory or filesystem write path
-      exists on the server.
-- [ ] **P12-03** Re-verify the two known browser storage uses are content-free:
-      `sessionStorage` session handle and `localStorage` mute preference.
-- [ ] **P12-04** Automated no-content log test: full match with chat and images, capture all
-      `console.*` and server log output, assert no message body or image byte appears.
-- [ ] **P12-05** Two-browser E2E for the complete flow.
-- [ ] **P12-06** Network-interruption E2E: cut and restore the socket mid-match.
-- [ ] **P12-07** Full chaos matrix at maximum severity in CI.
-- [ ] **P12-08** Publish the audit report with evidence — code references and test names, not
-      assurances.
+- [x] **P12-01** Done as an executable inventory rather than a document
+      (`tests/privacy.test.ts`): one rule per category — `localStorage`, `sessionStorage`,
+      IndexedDB, the Cache API, cookies, the filesystem, database clients, object storage,
+      analytics — each with an allowlist. A new place that could retain content fails the suite and
+      has to be argued for in the report before it can ship. Comments are stripped before scanning,
+      because an explanation of why something is *not* used must not read as a use of it.
+- [x] **P12-02** No filesystem path exists in `server/` at all — no `node:fs`, no temp directory,
+      no upload directory. That is a consequence of the Phase 7 design rather than an omission:
+      chunks are assembled in memory, and the conventional write-assemble-unlink shape is the one
+      that leaves attachments on a disk after a crash.
+- [x] **P12-03** Both browser stores re-verified against the bytes they actually write. The
+      session handle is compared *whole*, so a field added later cannot ride along unnoticed, and
+      the room key is asserted absent — it lives in the URL fragment and in memory, and a second
+      copy in storage would outlive the tab that earned it.
+- [x] **P12-04** `tests/logAudit.test.ts` plays a full match — sealed text, a sticker, a quick
+      reaction, a sealed image over the chunked transport, five moves, a malformed frame and a
+      refused command — with every `console.*` channel **and** the raw `process.stdout`/`stderr`
+      writes captured. It asserts the output contains none of the plaintext, none of the
+      ciphertext (a log of unreadable bytes is still a log of the conversation, and it would
+      outlive the key), no image data, no secret, no token — and in fact **nothing at all**. "It
+      did not log the secret" is weaker than "it did not log", and the second is the claim this
+      product makes. The malformed frame is deliberate: an error handler that serialises what it
+      choked on is the leak a code reading would miss.
+- [x] **P12-05** `e2e/journey.spec.ts` does what two people actually do: open a room, send the
+      link, join by link, talk both ways, play, check the score on both screens, rematch, leave —
+      and confirms the room survives the leaver.
+- [x] **P12-06** The same file cuts the network mid-match. `context.setOffline` turned out to be
+      the wrong tool and finding that out was the point: it drops the link without closing an open
+      socket, so the opponent never learns anything happened. `e2e/support/cutSocket.ts` closes the
+      socket from inside the page and refuses new connections until restored, which is an
+      interruption the server actually sees.
+- [x] **P12-07** Six network profiles, forty seeds each, 240 matches, every invariant and full
+      convergence asserted on every run. Gated behind `GRIDLINE_CHAOS_MATRIX` so CI runs it on
+      every push while a developer running the suite locally does not wait on it to learn their
+      typo is a typo.
+- [x] **P12-08** [`docs/PRIVACY_AUDIT.md`](./PRIVACY_AUDIT.md), written as evidence: every claim
+      names a file you can read or a test you can run, the known limits are stated plainly rather
+      than omitted, and the last section is how to re-run the whole thing.

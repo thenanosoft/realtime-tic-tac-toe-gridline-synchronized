@@ -36,6 +36,13 @@ jobs:
       - run: npm ci
       - name: Run the chaos and property suites
         run: npm run test:chaos
+      - name: Run the full chaos matrix
+        # Six network profiles, forty seeds each. Gated by an environment
+        # variable so a developer running the suite locally does not wait on
+        # 240 matches to learn their typo is a typo (P12-07).
+        env:
+          GRIDLINE_CHAOS_MATRIX: '1'
+        run: npm run test:chaos
 
   e2e:
     name: Two-browser end-to-end

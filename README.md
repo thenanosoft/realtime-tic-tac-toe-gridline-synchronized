@@ -124,6 +124,14 @@ Room destruction occurs when:
 
 A successful refresh/reconnect before destruction restores the same identity, mark, board, rematch state, and current RAM-only chat snapshot. After destruction, the old token cannot recover anything.
 
+### Privacy, with evidence
+
+[`docs/PRIVACY_AUDIT.md`](docs/PRIVACY_AUDIT.md) lists everything Gridline retains - two browser
+values, neither containing anything anyone wrote - and names the test behind each claim. The audit
+runs as part of the suite (`tests/privacy.test.ts`), so a new place that could keep content fails
+the build rather than quietly shipping. A second test plays a whole match with every output stream
+captured and asserts the server logged nothing at all.
+
 ### End-to-end encryption
 
 Rooms opened with the encryption option on seal their chat **in the browser**. The server

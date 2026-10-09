@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { BRUTAL_CHAOS, CHAOS_BUILD_MARKER, createRandom, decide, NO_CHAOS } from '../shared/chaos';
+import { BROWSER_CHAOS, BRUTAL_CHAOS, CHAOS_BUILD_MARKER, createRandom, decide, NO_CHAOS } from '../shared/chaos';
 import { runChaosMatch, type SimulationResult } from './support/simulation';
 
 describe('chaos policy determinism (P3-03)', () => {
@@ -130,6 +130,60 @@ describe('chaos matches (P3-04, P3-05, P3-06)', () => {
     expect(duplicates, 'no duplicated commands across 200 runs').toBeGreaterThan(0);
     expect(disconnects, 'no disconnects across 200 runs').toBeGreaterThan(0);
   }, 180_000);
+
+  /**
+   * The full matrix (P12-07).
+   *
+   * The 200-seed sweep above runs one profile hard. This runs every profile the
+   * product could plausibly meet - six shapes of bad network, forty seeds each,
+   * 240 matches - and is the last thing standing between "it works on my
+   * connection" and a claim about the protocol.
+   *
+   * It is gated behind an environment variable rather than deleted or left at a
+   * smaller size: CI runs it on every push, and a developer running the suite
+   * locally should not wait two minutes to learn their typo is a typo.
+   */
+  const matrix = [
+    { name: 'pristine', profile: { ...NO_CHAOS }, disconnectRate: 0 },
+    { name: 'mobile', profile: { ...BROWSER_CHAOS }, disconnectRate: 0 },
+    { name: 'brutal', profile: { ...BRUTAL_CHAOS }, disconnectRate: 0 },
+    { name: 'brutal with churn', profile: { ...BRUTAL_CHAOS }, disconnectRate: 0.1 },
+    { name: 'wide jitter', profile: { ...BRUTAL_CHAOS, minDelayMs: 100, maxDelayMs: 1_500, jitterMs: 600 }, disconnectRate: 0.05 },
+    { name: 'duplicate storm', profile: { ...BRUTAL_CHAOS, duplicateRate: 0.3 }, disconnectRate: 0.05 },
+  ];
+
+  it.skipIf(!process.env.GRIDLINE_CHAOS_MATRIX)('holds every invariant across the full matrix', async () => {
+    const failures: string[] = [];
+    let runs = 0;
+    let finished = 0;
+    let converged = 0;
+
+    for (const entry of matrix) {
+      for (let seed = 1; seed <= 40; seed += 1) {
+        const result = await runChaosMatch({
+          seed,
+          profile: { ...entry.profile, seed },
+          disconnectRate: entry.disconnectRate,
+          advance,
+        });
+        runs += 1;
+        if (result.violations.length) failures.push(entry.name + ' ' + summarise(seed, result));
+        if (result.finished) {
+          finished += 1;
+          const server = JSON.stringify(result.serverSnapshot);
+          if (result.clientSnapshots.every((snapshot) => JSON.stringify(snapshot) === server)) converged += 1;
+        }
+      }
+    }
+
+    expect(failures, failures.slice(0, 5).join('\n')).toEqual([]);
+    // Completion and convergence are required of every single run. A matrix
+    // that quietly stopped finishing matches would otherwise keep reporting a
+    // clean bill of health while proving nothing at all.
+    expect(runs).toBe(matrix.length * 40);
+    expect(finished).toBe(runs);
+    expect(converged).toBe(runs);
+  }, 600_000);
 
   it('reproduces a run exactly from its seed', async () => {
     const first = await runChaosMatch({ seed: 555, profile: BRUTAL_CHAOS, advance });

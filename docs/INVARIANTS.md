@@ -193,3 +193,12 @@ answers for something only the live server can know.
 *How it breaks:* a cache-first service worker; gating reconnection on `navigator.onLine`, which
 reports a link rather than reachability; or treating a surviving socket as proof of nothing and
 reconnecting over a working one.
+
+### INV-18 — Every claim has a test
+No statement in the README or in `docs/PRIVACY_AUDIT.md` about what Gridline keeps, logs or sends
+stands without something in the suite that fails when it stops being true.
+
+*Defended by:* `P12-01` … `P12-08`. The audit is `tests/privacy.test.ts`; the log capture is
+`tests/logAudit.test.ts`; the document is the readable version of both.
+*How it breaks:* adding a storage call and an allowlist entry in the same change without saying
+why in the report — the rule is there to force the exception to be named, not to be widened.
